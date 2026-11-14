@@ -1,0 +1,3113 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Burnt Again</title>
+<style>
+:root { color-scheme: dark; }
+
+  html, body { margin: 0; height: 100%; background: #0e0c17; overflow: hidden; overscroll-behavior: none; }
+  canvas { display: block; touch-action: none; user-select: none; -webkit-user-select: none; outline: none; }
+  #tune {
+    position: fixed; top: 12px; right: 12px; width: 270px; padding: 12px 14px; display: none;
+    background: #000c; color: #eee; border-radius: 8px; z-index: 5;
+    font: 12px/1.4 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  #tune label { display: flex; justify-content: space-between; margin-top: 8px; }
+  #tune input { width: 100%; margin: 2px 0 0; }
+  #tune button { margin-top: 10px; padding: 4px 10px; font: inherit; cursor: pointer; }
+  #tune b { font-size: 13px; }
+
+body { background: #0e0c17; }
+</style>
+<canvas id="game" tabindex="0" aria-label="Burnt Again game"></canvas>
+<div id="tune"></div>
+<script>
+// Global constants. Classic scripts on one namespace so the game also runs from file:// with no build step.
+(function (root) {
+  const G = (root.Grudge = root.Grudge || {});
+
+  G.CFG = {
+    DEV: true, // level skip + tuning panel. Turn off for the Poki build.
+    SHARE_URL: '', // public game link added to shared text. Empty until the game is hosted.
+
+    W: 960, H: 540, // logical 16:9 screen
+    T: 40, COLS: 24, ROWS: 13, // level grid
+    TOP: 20, // world is drawn this far below the top of the screen
+    PW: 28, PH: 28, // player box
+    STEP: 1 / 120, // twice the usual rate, so input reaches the screen sooner
+
+    // Feel. All of these can be changed live with the tuning panel (T key).
+    runSpeed: 300,
+    groundAccel: 5200,
+    groundFric: 6000,
+    airAccel: 3600,
+    airFric: 2200,
+    gravity: 2300,
+    fallMult: 1.25, // falling is heavier than rising
+    jumpVel: 780,
+    jumpCut: 0.45, // velocity kept when jump is released early
+    maxFall: 950,
+    coyote: 0.08, // can still jump this long after leaving a ledge
+    buffer: 0.11, // jump pressed this early still counts on landing
+
+    respawnDelay: 0.42,
+  };
+
+  G.COLORS = {
+    hazard: '#ff2d55',
+    player: '#ffc933',
+    playerEye: '#191627',
+    bread: '#ffd98a',
+    crust: '#b8742c',
+    burnt: '#7a6a7e',
+    burntCrust: '#54465a',
+    smoke: '#888780',
+    door: '#22e0a1',
+    doorDark: '#0c7a58',
+    pad: '#36c9ff',
+    platform: '#a493ff',
+    themes: [
+      { bg: '#191627', block: '#efe9dc', under: '#c9c2b2' },
+      { bg: '#12202e', block: '#e6eef0', under: '#b9c8cd' },
+      { bg: '#1f1a2e', block: '#f0e3e8', under: '#cbb9c1' },
+      { bg: '#10241f', block: '#e4f0e2', under: '#b7c9b4' },
+      { bg: '#271a20', block: '#f3e6d6', under: '#cfbda9' },
+    ],
+  };
+})(globalThis);
+
+// All player-facing text. Order follows Poki's suggested localisation priority.
+// Every row lists the languages in the order of CODES. tests/i18n.js checks nothing is missing.
+(function (root) {
+  const G = root.Grudge;
+  const C = G.CFG;
+
+  const CODES = ['en', 'fr', 'it', 'de', 'es', 'tr', 'zh', 'ja', 'ko', 'pt', 'ru'];
+  const NAMES = ['English', 'Français', 'Italiano', 'Deutsch', 'Español', 'Türkçe', '简体中文', '日本語', '한국어', 'Português (BR)', 'Русский'];
+  // Languages written without spaces between sentences.
+  const NO_SPACE = new Set(['zh', 'ja']);
+
+  const T = {
+    title: ['BURNT AGAIN', 'BURNT AGAIN', 'BURNT AGAIN', 'BURNT AGAIN', 'BURNT AGAIN', 'BURNT AGAIN', '记仇吐司', 'BURNT AGAIN', 'BURNT AGAIN', 'BURNT AGAIN', 'BURNT AGAIN'],
+    tagline: ['The level remembers every burn.', 'Le niveau n’oublie aucune brûlure.', 'Il livello ricorda ogni bruciatura.', 'Das Level merkt sich jedes Anbrennen.', 'El nivel recuerda cada quemadura.', 'Bölüm her yanığı hatırlar.', '关卡记得你每一次烤焦。', 'ステージは、キミのこげ跡を忘れない。', '스테이지는 네가 탄 순간을 다 기억해.', 'A fase lembra cada queimadura.', 'Уровень помнит каждый ожог.'],
+    start: ['Press SPACE to start', 'Appuie sur ESPACE pour commencer', 'Premi SPAZIO per iniziare', 'Drücke LEERTASTE zum Starten', 'Pulsa ESPACIO para empezar', 'Başlamak için BOŞLUK tuşuna bas', '按 空格 开始', 'スペースキーでスタート', '스페이스바를 눌러 시작', 'Aperte ESPAÇO para começar', 'Нажми ПРОБЕЛ, чтобы начать'],
+    cont: ['Press SPACE to continue · N for new game', 'ESPACE pour continuer · N pour une nouvelle partie', 'SPAZIO per continuare · N per una nuova partita', 'LEERTASTE zum Fortsetzen · N für neues Spiel', 'ESPACIO para continuar · N para nueva partida', 'Devam için BOŞLUK · Yeni oyun için N', '按 空格 继续 · 按 N 重新开始', 'スペースで続ける · Nで最初から', '스페이스바로 계속 · N으로 새 게임', 'ESPAÇO para continuar · N para novo jogo', 'ПРОБЕЛ — продолжить · N — новая игра'],
+    tapStart: ['or tap', 'ou touche l’écran', 'o tocca lo schermo', 'oder tippe', 'o toca la pantalla', 'veya ekrana dokun', '或点击屏幕', 'または画面をタップ', '또는 화면을 터치', 'ou toque na tela', 'или коснись экрана'],
+    deaths: ['Burnt', 'Cramés', 'Bruciature', 'Angebrannt', 'Quemadas', 'Yanık', '烤焦', 'こげた回数', '탄 횟수', 'Queimadas', 'Ожоги'],
+    levelLabel: ['Level {n}', 'Niveau {n}', 'Livello {n}', 'Level {n}', 'Nivel {n}', 'Bölüm {n}', '第 {n} 关', 'ステージ {n}', '스테이지 {n}', 'Fase {n}', 'Уровень {n}'],
+    paused: ['Paused', 'Pause', 'Pausa', 'Pause', 'Pausa', 'Duraklatıldı', '已暂停', '一時停止', '일시 정지', 'Pausado', 'Пауза'],
+    resume: ['Press ESC or SPACE to resume', 'ÉCHAP ou ESPACE pour reprendre', 'ESC o SPAZIO per riprendere', 'ESC oder LEERTASTE zum Fortsetzen', 'ESC o ESPACIO para continuar', 'Devam için ESC veya BOŞLUK', '按 ESC 或 空格 继续', 'ESCかスペースで再開', 'ESC 또는 스페이스바로 계속', 'ESC ou ESPAÇO para continuar', 'ESC или ПРОБЕЛ — продолжить'],
+    controls: ['← → or A D to move · SPACE to jump · R to restart', '← → ou A D pour bouger · ESPACE pour sauter · R pour recommencer', '← → o A D per muoverti · SPAZIO per saltare · R per ricominciare', '← → oder A D: Bewegen · LEERTASTE: Springen · R: Neustart', '← → o A D para moverte · ESPACIO para saltar · R para reiniciar', '← → veya A D: Hareket · BOŞLUK: Zıpla · R: Yeniden başla', '← → 或 A D 移动 · 空格 跳跃 · R 重来', '← → か A D で移動 · スペースでジャンプ · Rでやり直し', '← → 또는 A D 이동 · 스페이스바 점프 · R 다시 시작', '← → ou A D para mover · ESPAÇO para pular · R para recomeçar', '← → или A D — ходьба · ПРОБЕЛ — прыжок · R — заново'],
+    jumpHint: ['Hold jump longer to go higher', 'Maintiens le saut pour aller plus haut', 'Tieni premuto per saltare più in alto', 'Länger halten, um höher zu springen', 'Mantén pulsado para saltar más alto', 'Daha yükseğe için uzun bas', '按住跳跃键越久，跳得越高', '長押しで高くジャンプ', '길게 누르면 더 높이 점프', 'Segure para pular mais alto', 'Держи дольше, чтобы прыгнуть выше'],
+    reversed: ['CONTROLS REVERSED', 'COMMANDES INVERSÉES', 'COMANDI INVERTITI', 'STEUERUNG VERTAUSCHT', 'CONTROLES INVERTIDOS', 'KONTROLLER TERS', '左右颠倒', '左右が逆に', '좌우 반전', 'CONTROLES INVERTIDOS', 'УПРАВЛЕНИЕ НАОБОРОТ'],
+    endTitle: ['That is all for now', 'C’est tout pour l’instant', 'Per ora è tutto', 'Das war’s fürs Erste', 'Eso es todo por ahora', 'Şimdilik bu kadar', '目前就这么多', '今回はここまで', '오늘은 여기까지', 'Por enquanto é só', 'Пока это всё'],
+    endStat: ['Total burns', 'Toasts cramés', 'Bruciature totali', 'Insgesamt angebrannt', 'Tostadas quemadas', 'Toplam yanık', '总烤焦次数', '合計こげた回数', '총 탄 횟수', 'Torradas queimadas', 'Всего ожогов'],
+    endPrompt: ['Press SPACE to play again', 'ESPACE pour rejouer', 'SPAZIO per giocare ancora', 'LEERTASTE für eine neue Runde', 'ESPACIO para volver a jugar', 'Tekrar oynamak için BOŞLUK', '按 空格 再玩一次', 'スペースでもう一度', '스페이스바로 다시 하기', 'ESPAÇO para jogar de novo', 'ПРОБЕЛ — сыграть ещё раз'],
+    share: ['Share with friends (S)', 'Envoyer à un ami (S)', 'Invia a un amico (S)', 'Mit Freunden teilen (S)', 'Compartir con amigos (S)', 'Arkadaşlarınla paylaş (S)', '分享给朋友（S）', '友達にシェア（S）', '친구에게 공유 (S)', 'Enviar a um amigo (S)', 'Поделиться (S)'],
+    shareShort: ['Share', 'Partager', 'Condividi', 'Teilen', 'Compartir', 'Paylaş', '分享', 'シェア', '공유', 'Compartilhar', 'Поделиться'],
+    shareCopied: ['Score card copied. Paste it to a friend.', 'Carte copiée. Colle-la dans ta discussion.', 'Scheda copiata. Incollala in chat.', 'Karte kopiert. Füg sie im Chat ein.', 'Tarjeta copiada. Pégala en el chat.', 'Kart kopyalandı. Sohbete yapıştır.', '成绩图已复制，粘贴发给朋友就行', 'スコア画像をコピーしたよ。チャットに貼ってね。', '점수 이미지를 복사했어. 채팅에 붙여 넣어 봐.', 'Cartão copiado. Cole no chat.', 'Карточка скопирована. Вставь её в чат.'],
+    shareSaved: ['Score card saved. Send the image to a friend.', 'Carte enregistrée. Envoie l’image à tes amis.', 'Scheda salvata. Mandala ai tuoi amici.', 'Karte gespeichert. Schick sie deinen Freunden.', 'Tarjeta guardada. Envíala a tus amigos.', 'Kart kaydedildi. Arkadaşlarına gönder.', '成绩图已保存，把图片发给朋友就行', 'スコア画像を保存したよ。友達に送ろう。', '점수 이미지를 저장했어. 친구한테 보내 봐.', 'Cartão salvo. Mande para seus amigos.', 'Карточка сохранена. Отправь её друзьям.'],
+    cardBurnt: ['times burnt', 'toasts cramés', 'bruciature', 'Mal angebrannt', 'tostadas quemadas', 'kez yandı', '次被烤焦', '回こげた', '번 타 버렸다', 'torradas queimadas', 'раз подгорел тост'],
+    cardCleared: ['Cleared all levels', 'Tous les niveaux terminés', 'Tutti i livelli superati', 'Alle Level geschafft', 'Todos los niveles superados', 'Tüm bölümler bitti', '已通关', '全ステージクリア', '모든 스테이지 클리어', 'Todas as fases concluídas', 'Все уровни пройдены'],
+    cardReached: ['Reached level {n}', 'Niveau {n} atteint', 'Livello raggiunto: {n}', 'Level {n} erreicht', 'Nivel alcanzado: {n}', '{n}. bölüme ulaştı', '打到第 {n} 关', 'ステージ {n} まで到達', '스테이지 {n}까지 도달', 'Fase alcançada: {n}', 'Достигнут уровень {n}'],
+    cardWorst: ['Burnt most: level {n}', 'Le plus brûlant : niveau {n}', 'Il più rovente: livello {n}', 'Am heißesten: Level {n}', 'El que más quema: nivel {n}', 'En çok yakan: {n}. bölüm', '烤焦我最多：第 {n} 关', '一番こげたのはステージ {n}', '제일 많이 탄 곳: 스테이지 {n}', 'A que mais queima: fase {n}', 'Сильнее всего обжёг: уровень {n}'],
+    cardDare: ['Can you do better?', 'Tu feras mieux ?', 'Tu sai fare di meglio?', 'Schaffst du’s besser?', '¿Tú lo harías mejor?', 'Sen daha iyisini yapar mısın?', '你能少烤焦几次吗？', 'キミならもっと焦げずにすむ？', '넌 덜 탈 수 있어?', 'Você faz melhor?', 'А ты сможешь лучше?'],
+    shareDone: ['I beat {g} and got burnt {n} times.', 'J’ai terminé {g} avec {n} toasts cramés.', 'Ho finito {g} con {n} bruciature.', 'Ich habe {g} geschafft und bin {n} Mal angebrannt.', 'Terminé {g} con {n} tostadas quemadas.', '{g} oyununu bitirdim ve {n} kez yandım.', '我通关了《{g}》，被烤焦了 {n} 次。', '{g} クリア！{n} 回こげたよ。', '{g} 클리어! {n}번 타 버렸어.', 'Terminei {g} com {n} torradas queimadas.', '{g} пройдена, тост подгорел {n} раз.'],
+    shareAt: ['I reached level {r} of {g} and got burnt {n} times.', 'Je suis au niveau {r} de {g} avec {n} toasts cramés.', 'Sono al livello {r} di {g} con {n} bruciature.', 'Ich bin in {g} bei Level {r} und schon {n} Mal angebrannt.', 'Voy por el nivel {r} de {g} con {n} tostadas quemadas.', '{g} oyununda {r}. bölüme ulaştım ve {n} kez yandım.', '我在《{g}》打到第 {r} 关，被烤焦了 {n} 次。', '{g} のステージ {r} まで来て、{n} 回こげたよ。', '{g} 스테이지 {r}까지 왔고 {n}번 타 버렸어.', 'Estou na fase {r} de {g} com {n} torradas queimadas.', '{g}: уровень {r}, тост подгорел {n} раз.'],
+    shareWorst: ['Level {w} burnt me the most.', 'Le niveau {w} m’a le plus cramé.', 'Il livello {w} mi ha bruciato più di tutti.', 'Level {w} hat mich am meisten verbrannt.', 'El nivel {w} es el que más me ha quemado.', 'Beni en çok {w}. bölüm yaktı.', '第 {w} 关烤焦我最多。', '一番こげたのはステージ {w}。', '스테이지 {w}에서 제일 많이 탔어.', 'A fase {w} foi a que mais me queimou.', 'Сильнее всего меня обжёг уровень {w}.'],
+
+    startTouch: ['Tap to start', 'Touche pour commencer', 'Tocca per iniziare', 'Tippen zum Starten', 'Toca para empezar', 'Başlamak için dokun', '点击屏幕开始', 'タップでスタート', '터치해서 시작', 'Toque para começar', 'Коснись, чтобы начать'],
+    contTouch: ['Tap to continue', 'Touche pour continuer', 'Tocca per continuare', 'Tippen zum Fortsetzen', 'Toca para continuar', 'Devam için dokun', '点击屏幕继续', 'タップで続ける', '터치해서 계속', 'Toque para continuar', 'Коснись, чтобы продолжить'],
+    resumeTouch: ['Tap to resume', 'Touche pour reprendre', 'Tocca per riprendere', 'Tippen zum Fortsetzen', 'Toca para continuar', 'Devam için dokun', '点击屏幕继续', 'タップで再開', '터치해서 계속', 'Toque para continuar', 'Коснись, чтобы продолжить'],
+    endPromptTouch: ['Tap to play again', 'Touche pour rejouer', 'Tocca per giocare ancora', 'Tippen für eine neue Runde', 'Toca para volver a jugar', 'Tekrar oynamak için dokun', '点击屏幕再玩一次', 'タップでもう一度', '터치해서 다시 하기', 'Toque para jogar de novo', 'Коснись, чтобы сыграть ещё раз'],
+    controlsTouch: ['Use the buttons to move and jump', 'Utilise les boutons pour bouger et sauter', 'Usa i pulsanti per muoverti e saltare', 'Mit den Tasten bewegen und springen', 'Usa los botones para moverte y saltar', 'Hareket ve zıplama için düğmeleri kullan', '用按钮移动和跳跃', 'ボタンで移動とジャンプ', '버튼으로 이동하고 점프해', 'Use os botões para andar e pular', 'Кнопки — ходьба и прыжок'],
+    rotate: ['Turn your device sideways', 'Tourne ton appareil', 'Ruota il dispositivo', 'Dreh dein Gerät quer', 'Gira tu dispositivo', 'Cihazını yan çevir', '请把设备横过来', '端末を横向きにしてね', '기기를 가로로 돌려 줘', 'Vire o aparelho de lado', 'Поверни устройство боком'],
+    restart: ['Restart level', 'Recommencer le niveau', 'Ricomincia il livello', 'Level neu starten', 'Reiniciar nivel', 'Bölümü yeniden başlat', '重开本关', 'ステージをやり直す', '스테이지 다시 시작', 'Recomeçar a fase', 'Начать уровень заново'],
+    newGame: ['New game', 'Nouvelle partie', 'Nuova partita', 'Neues Spiel', 'Nueva partida', 'Yeni oyun', '重新开始', '最初から', '새 게임', 'Novo jogo', 'Новая игра'],
+
+    'lv_first-steps': ['Get to know each other', 'Faisons connaissance', 'Facciamo conoscenza', 'Lernen wir uns kennen', 'Vamos a conocernos', 'Tanışalım', '先认识一下', 'まずは自己紹介', '먼저 인사부터', 'Vamos nos conhecer', 'Давай познакомимся'],
+    'lv_honest-spikes': ['The red ones are the honest ones', 'Seuls les rouges sont honnêtes', 'Solo i rossi sono onesti', 'Ehrlich sind nur die Roten', 'Solo los rojos son honestos', 'Yalnızca kırmızılar dürüst', '红色的才是老实人', '正直者は赤いやつ', '정직한 건 빨간 애들뿐', 'Só os vermelhos são honestos', 'Честны только красные'],
+    'lv_low-ceiling': ['Mind your head', 'Baisse la tête', 'Giù la testa', 'Kopf einziehen!', 'Agacha la cabeza', 'Başını eğ', '小心头顶', '頭上注意', '머리 조심해', 'Abaixa a cabeça', 'Голову береги'],
+    'lv_trust-issues': ['Trust issues', 'Problèmes de confiance', 'Problemi di fiducia', 'Vertrauensprobleme', 'Problemas de confianza', 'Güven sorunları', '信任危机', '信頼の危機', '신뢰의 위기', 'Problemas de confiança', 'Проблемы с доверием'],
+    'lv_cold-feet': ['The scenic route', 'Le chemin des écoliers', 'La strada panoramica', 'Der Umweg', 'La ruta panorámica', 'Manzaralı yol', '绕远路', '遠回り', '돌아가는 길', 'O caminho mais longo', 'В обход'],
+    'lv_keep-moving': ['Keep moving', 'Ne t’arrête pas', 'Non fermarti', 'Bleib in Bewegung', 'No te detengas', 'Durma', '别停', '止まるな', '멈추지 마', 'Não pare', 'Не останавливайся'],
+    'lv_wrong-way': ['Left is the new right', 'La gauche, c’est la nouvelle droite', 'La sinistra è la nuova destra', 'Links ist das neue Rechts', 'Izquierda es la nueva derecha', 'Sol, yeni sağdır', '左就是右', '左こそ右', '왼쪽이 곧 오른쪽', 'Esquerda é a nova direita', 'Лево — это новое право'],
+    'lv_other-floor': ['The other floor', 'L’autre sol', 'L’altro pavimento', 'Der andere Boden', 'El otro suelo', 'Öteki zemin', '另一层地板', 'もう一つの床', '또 다른 바닥', 'O outro chão', 'Другой пол'],
+    'lv_free-ride': ['Free ride', 'Course gratuite', 'Passaggio gratis', 'Freie Fahrt', 'Viaje gratis', 'Bedava yolculuk', '免费专车', '無料送迎', '무료 탑승', 'Carona grátis', 'Прокатись даром'],
+    'lv_final-exam': ['Final exam', 'Examen final', 'Esame finale', 'Abschlussprüfung', 'Examen final', 'Final sınavı', '期末考试', '期末試験', '기말고사', 'Prova final', 'Выпускной экзамен'],
+
+    firstMeet: ['This door doesn’t open for strangers. Get burnt once. Then we’ll talk.', 'Cette porte ne s’ouvre pas aux inconnus. Brûle une fois, on en reparlera.', 'Questa porta non si apre agli sconosciuti. Brùciati una volta, poi ne parliamo.', 'Diese Tür öffnet sich nicht für Fremde. Brenn einmal an, dann reden wir.', 'Esta puerta no se abre a desconocidos. Quémate una vez y hablamos.', 'Bu kapı yabancılara açılmaz. Önce bir yan, sonra konuşuruz.', '这扇门不给陌生人开。先烤焦一次，让我认识认识你。', 'このドアは知らないヤツには開かない。まず一回こげてくれ。話はそれからだ。', '이 문은 낯선 사람한테 안 열려. 일단 한 번 타 봐. 얘기는 그다음에.', 'Esta porta não abre pra estranhos. Queime uma vez e a gente conversa.', 'Незнакомцам эта дверь не открывается. Обожгись разок, потом поговорим.'],
+    firstNote: ['Noted. Door’s open, spike’s gone. Off you go. I’d never lie to you.', 'C’est noté. Porte ouverte, pic enlevé. Vas-y. Je ne te mentirais jamais.', 'Annotato. Porta aperta, spuntone sparito. Vai pure. Figurati se ti mento.', 'Notiert. Tür offen, Stachel weg. Na los. Ich würde dich nie anlügen.', 'Anotado. Puerta abierta, pincho fuera. Adelante. ¿Yo mentirte? Jamás.', 'Not aldım. Kapı açık, diken gitti. Hadi bakalım. Ben sana yalan söyler miyim?', '记下了。门开了，刺也撤了。去吧，我怎么会骗你呢。', 'メモした。ドアは開けたし、トゲもどけた。さあ行きなよ。ウソなんてつかないって。', '적어 뒀어. 문 열었고 가시도 치웠어. 가 봐. 내가 설마 거짓말하겠어?', 'Anotado. Porta aberta, espinho fora. Pode ir. Eu lá ia mentir pra você?', 'Записано. Дверь открыта, шипа нет. Иди. Врать я не умею.'],
+    locked1: ['Still a stranger. Get burnt first.', 'On ne se connaît toujours pas. Brûle d’abord.', 'Non ci conosciamo ancora. Prima brùciati.', 'Wir kennen uns noch nicht. Erst anbrennen.', 'Aún no nos conocemos. Quémate primero.', 'Hâlâ tanışmadık. Önce bir yan.', '还是陌生人。先烤焦一次。', 'まだ他人だろ。先にこげてくれ。', '우린 아직 남이야. 먼저 타 봐.', 'A gente ainda não se conhece. Queime primeiro.', 'Мы всё ещё незнакомы. Сначала обожгись.'],
+    locked2: ['No burn, no door. Those are the rules.', 'Pas de brûlure, pas de porte. C’est comme ça.', 'Niente bruciatura, niente porta. Funziona così.', 'Nicht angebrannt, keine Tür. So sind die Regeln.', 'Sin quemadura no hay puerta. Así funciona.', 'Yanık yoksa kapı da yok. Kural bu.', '没烤焦过就没门。规矩就是规矩。', 'こげないならドアもなし。ルールだ。', '타기 전엔 문도 없어. 규칙이야.', 'Sem queimadura, sem porta. É a regra.', 'Нет ожога — нет двери. Таковы правила.'],
+    remember1: ['You stood right here last time. I remember.', 'La dernière fois, tu étais juste ici. Je m’en souviens.', 'L’ultima volta eri proprio qui. Me lo ricordo.', 'Letztes Mal standest du genau hier. Ich weiß das noch.', 'La última vez estabas justo aquí. Lo recuerdo.', 'Geçen sefer tam buradaydın. Hatırlıyorum.', '你上次就站在这儿。我记得。', '前回もここに立ってたよね。覚えてるよ。', '지난번에 딱 여기 서 있었지. 다 기억해.', 'Da última vez você estava bem aqui. Eu lembro.', 'В прошлый раз — именно здесь. Я помню.'],
+    remember2: ['This spot? Yes. I kept it for you.', 'Cet endroit ? Oui. Je te l’ai gardé.', 'Questo posto? Sì. L’ho tenuto per te.', 'Diese Stelle? Ja. Hab ich dir freigehalten.', '¿Este sitio? Sí. Te lo guardé.', 'Burası mı? Evet. Sana sakladım.', '这个位置？对，我给你留着呢。', 'この場所？うん、キミのために取っておいた。', '이 자리? 응, 널 위해 남겨 뒀지.', 'Este lugar? É. Guardei pra você.', 'Это место? Да, оно ждало тебя.'],
+    remember3: ['I told you I take notes.', 'Je t’avais dit que je prenais des notes.', 'Te l’avevo detto che prendo appunti.', 'Ich sagte doch, ich mache mir Notizen.', 'Te dije que tomo notas.', 'Not aldığımı söylemiştim.', '说了我会记小本本。', '全部メモしてるって言ったよね。', '내가 다 적어 둔다고 했지.', 'Eu avisei que anoto tudo.', 'У меня всё записано. Я предупреждал.'],
+    remember4: ['Did you really think I’d forget?', 'Tu croyais vraiment que j’allais oublier ?', 'Pensavi davvero che dimenticassi?', 'Dachtest du wirklich, ich vergesse das?', '¿De verdad creías que lo olvidaría?', 'Gerçekten unutacağımı mı sandın?', '你以为我会忘？', '忘れるとでも思った？', '내가 잊을 줄 알았어?', 'Achou mesmo que eu ia esquecer?', 'Думаешь, я забуду?'],
+    spike1: ['That spike hasn’t moved once. You found it anyway.', 'Ce pic n’a jamais bougé. Tu l’as trouvé quand même.', 'Quello spuntone non si è mai mosso. L’hai trovato lo stesso.', 'Der Stachel hat sich nie bewegt. Du hast ihn trotzdem gefunden.', 'Ese pincho no se ha movido nunca. Lo encontraste igual.', 'O diken hiç kıpırdamadı. Yine de buldun.', '那根刺一动没动，你还是撞上去了。', 'あのトゲ、一度も動いてないんだけど。', '저 가시, 한 번도 안 움직였어. 그런데도 찾아갔네.', 'Esse espinho nunca saiu do lugar. Você achou mesmo assim.', 'Этот шип ни разу не шевельнулся. И всё равно — прямо в него.'],
+    spike2: ['Skewered. Breakfast is ruined.', 'En brochette. Adieu le petit-déj.', 'Allo spiedo. Colazione rovinata.', 'Aufgespießt. Frühstück ruiniert.', 'A la brocheta. Adiós, desayuno.', 'Şişe geçtin. Kahvaltı da gitti.', '被扎穿了。早餐毁了。', '串刺し。朝ごはんが台なしだ。', '꼬치 완성. 아침밥은 글렀네.', 'No espeto. Lá se foi o café da manhã.', 'На шампур. Завтрак испорчен.'],
+    popspike1: ['The floor had one surprise. It was for you.', 'Le sol cachait une surprise. Elle était pour toi.', 'Il pavimento aveva una sorpresa. Era per te.', 'Der Boden hatte eine Überraschung. Sie war für dich.', 'El suelo tenía una sorpresa. Era para ti.', 'Zeminde bir sürpriz vardı. Tam sana göre.', '地板只藏了一个惊喜，专门给你的。', '床にサプライズをひとつ。キミ専用だ。', '바닥에 깜짝 선물을 숨겨 뒀어. 네 거야.', 'O chão tinha uma surpresa. Era para você.', 'У пола был один сюрприз. Специально для тебя.'],
+    popspike2: ['Crumbs everywhere. I will remember this.', 'Des miettes partout. Je m’en souviendrai.', 'Briciole ovunque. Me lo ricorderò.', 'Überall Krümel. Das merke ich mir.', 'Migas por todas partes. Lo recordaré.', 'Her yer kırıntı. Bunu unutmayacağım.', '掉了一地渣。这笔我记下了。', 'パンくずだらけ。覚えておくよ。', '온통 빵 부스러기네. 기억해 둘게.', 'Migalha pra todo lado. Vou lembrar disso.', 'Везде крошки. Я это запомню.'],
+    pit1: ['The floor is a privilege, not a right.', 'Le sol est un privilège, pas un droit.', 'Il pavimento è un privilegio, non un diritto.', 'Boden ist ein Privileg, kein Recht.', 'El suelo es un privilegio, no un derecho.', 'Zemin bir ayrıcalıktır, hak değil.', '地板是福利，不是权利。', '床があるのは当たり前じゃない。', '바닥은 특권이지 권리가 아니야.', 'O chão é um privilégio, não um direito.', 'Пол — это привилегия, а не право.'],
+    pit2: ['Dropped. Butter side down, as always.', 'Côté beurre par terre, comme toujours.', 'Caduta: lato burro in giù, come sempre.', 'Runter. Butterseite nach unten, wie immer.', 'Al suelo, con la mantequilla para abajo. Como siempre.', 'Yine yağlı tarafının üstüne düştün.', '掉下去了。还是抹黄油那面朝下。', '落ちた。やっぱりバターの面が下。', '떨어졌네. 역시 버터 바른 면이 바닥으로.', 'Caiu. Com a manteiga pra baixo, como sempre.', 'Как всегда, маслом вниз.'],
+    crush1: ['Looked up too late. Writing that down.', 'Lever les yeux, c’était avant. Je note.', 'Hai guardato su troppo tardi. Me lo segno.', 'Zu spät nach oben geschaut. Notiert.', 'Miraste arriba demasiado tarde. Lo apunto.', 'Yukarı çok geç baktın. Not ediyorum.', '抬头抬晚了，记下了。', '見上げるのが遅かったね。メモしとく。', '위를 너무 늦게 봤어. 적어 둘게.', 'Olhou pra cima tarde demais. Anotado.', 'Наверх надо смотреть раньше. Записываю.'],
+    crush2: ['Congratulations. You are now a cracker.', 'Félicitations, te voilà biscotte.', 'Complimenti: ora sei una fetta biscottata.', 'Glückwunsch. Du bist jetzt Zwieback.', 'Felicidades. Ahora eres una galleta.', 'Tebrikler, artık krakersin.', '恭喜，你现在是一块饼干了。', 'おめでとう。これでキミもラスクだ。', '축하해. 이제 넌 크래커야.', 'Parabéns. Agora você é um biscoito.', 'Поздравляю. Теперь ты крекер.'],
+    wall1: ['It’s slower than you. That’s the embarrassing part.', 'Il est plus lent que toi. C’est ça, le plus gênant.', 'È più lento di te. Ecco la parte imbarazzante.', 'Es ist langsamer als du. Das ist das Peinliche daran.', 'Es más lento que tú. Eso es lo vergonzoso.', 'Senden yavaş. Asıl utanç verici olan bu.', '它比你慢。这才是丢人的地方。', 'あいつ、キミより遅いんだよ。そこが一番恥ずかしい。', '너보다 느린데. 그게 제일 창피한 거야.', 'É mais lento que você. Essa é a parte vergonhosa.', 'Он медленнее тебя. Вот что по-настоящему стыдно.'],
+    bullet1: ['It flew in a straight line. Very advanced.', 'Il volait tout droit. Du très haut niveau.', 'Volava dritto. Tecnologia avanzatissima.', 'Es flog geradeaus. Hochmodern.', 'Volaba en línea recta. Altísima tecnología.', 'Dümdüz uçtu. İleri teknoloji.', '它只会走直线，真是高科技。', 'まっすぐ飛んだだけ。すごい技術だね。', '직선으로 날아왔을 뿐이야. 대단한 기술이네.', 'Voou em linha reta. Tecnologia de ponta.', 'Он летел по прямой. Высокие технологии.'],
+    mimic1: ['The door ate you. It skipped lunch.', 'La porte t’a mangé. Elle n’avait pas déjeuné.', 'La porta ti ha mangiato. Non aveva pranzato.', 'Die Tür hat dich gefressen. Sie hatte noch kein Mittagessen.', 'La puerta te comió. No había almorzado.', 'Kapı seni yedi. Öğle yemeğini atlamıştı.', '门把你吃了。它还没吃早饭。', 'ドアに食われた。昼メシ抜きだったらしい。', '문한테 먹혔어. 점심을 걸렀나 봐.', 'A porta comeu você. Ela não tinha almoçado.', 'Дверь тебя съела. Она не обедала.'],
+  };
+
+  // Which lines the narrator can pick from.
+  G.LINES = {
+    remember: ['remember1', 'remember2', 'remember3', 'remember4'],
+    locked: ['locked1', 'locked2'],
+    spike: ['spike1', 'spike2'],
+    popspike: ['popspike1', 'popspike2'],
+    pit: ['pit1', 'pit2'],
+    crush: ['crush1', 'crush2'],
+    wall: ['wall1'],
+    bullet: ['bullet1'],
+    mimic: ['mimic1'],
+  };
+
+  function detect() {
+    const base = String((root.navigator && root.navigator.language) || 'en').slice(0, 2).toLowerCase();
+    return CODES.includes(base) ? base : 'en';
+  }
+
+  G.LANG = detect();
+
+  G.t = (key, vars) => {
+    const row = T[key];
+    if (!row) return key;
+    let str = row[CODES.indexOf(G.LANG)];
+    if (vars) for (const k of Object.keys(vars)) str = str.split(`{${k}}`).join(vars[k]);
+    return str;
+  };
+
+  G.Lang = {
+    CODES,
+    NAMES,
+    TABLE: T,
+    sentenceGap: () => (NO_SPACE.has(G.LANG) ? '' : ' '),
+    currentName: () => NAMES[CODES.indexOf(G.LANG)],
+    // A saved choice beats the browser setting.
+    init() {
+      const saved = G.Save.lang;
+      if (CODES.includes(saved)) G.LANG = saved;
+      if (root.document) root.document.documentElement.lang = G.LANG;
+    },
+    set(code) {
+      if (!CODES.includes(code)) return;
+      G.LANG = code;
+      G.Save.setLang(code);
+      if (root.document) root.document.documentElement.lang = code;
+    },
+    next() {
+      G.Lang.set(CODES[(CODES.indexOf(G.LANG) + 1) % CODES.length]);
+    },
+    available() {
+      const g = G.Game;
+      return g.scene === 'title' || g.scene === 'end' || (g.scene === 'play' && g.paused);
+    },
+    button() {
+      return { x: C.W - 190, y: 12, w: 178, h: 34 };
+    },
+    // Picker layout: three columns of language names.
+    cells() {
+      const w = 230, h = 54, gap = 12;
+      const left = (C.W - (w * 3 + gap * 2)) / 2;
+      const top = 120;
+      return CODES.map((code, i) => ({
+        code,
+        name: NAMES[i],
+        x: left + (i % 3) * (w + gap),
+        y: top + Math.floor(i / 3) * (h + gap),
+        w,
+        h,
+      }));
+    },
+  };
+})(globalThis);
+
+// Save data. Every read and write is guarded: private windows, blocked storage inside iframes,
+// full quotas and corrupted JSON must never break the game. It falls back to memory.
+(function (root) {
+  const G = root.Grudge;
+  const KEY = 'grudge-block-save-v1';
+  const MAX_DEATHS_PER_LEVEL = 20;
+
+  function fresh() {
+    return { v: 1, level: 0, totalDeaths: 0, deaths: {}, memory: {}, lang: null, muted: false };
+  }
+
+  function sanitize(raw) {
+    const s = fresh();
+    if (!raw || typeof raw !== 'object') return s;
+    if (Number.isInteger(raw.level) && raw.level >= 0) s.level = raw.level;
+    if (Number.isFinite(raw.totalDeaths) && raw.totalDeaths >= 0) s.totalDeaths = Math.floor(raw.totalDeaths);
+    if (raw.deaths && typeof raw.deaths === 'object') {
+      for (const id of Object.keys(raw.deaths)) {
+        if (!Array.isArray(raw.deaths[id])) continue;
+        s.deaths[id] = raw.deaths[id]
+          .filter((d) => d && Number.isFinite(d.x) && Number.isFinite(d.y) && typeof d.cause === 'string')
+          .slice(-MAX_DEATHS_PER_LEVEL);
+      }
+    }
+    if (typeof raw.lang === 'string') s.lang = raw.lang;
+    s.muted = raw.muted === true;
+    if (raw.memory && typeof raw.memory === 'object') {
+      for (const id of Object.keys(raw.memory)) {
+        const m = raw.memory[id];
+        if (!m || !Number.isInteger(m.deaths) || m.deaths < 0 || !Array.isArray(m.active)) continue;
+        s.memory[id] = { deaths: m.deaths, active: m.active.filter((a) => typeof a === 'string').slice(-2) };
+      }
+    }
+    return s;
+  }
+
+  function load() {
+    try {
+      const text = root.localStorage.getItem(KEY);
+      return text ? sanitize(JSON.parse(text)) : fresh();
+    } catch (e) {
+      return fresh();
+    }
+  }
+
+  let data = load();
+
+  function persist() {
+    try {
+      root.localStorage.setItem(KEY, JSON.stringify(data));
+    } catch (e) {
+      // Keep playing on the in-memory copy.
+    }
+  }
+
+  G.Save = {
+    get level() { return data.level; },
+    get totalDeaths() { return data.totalDeaths; },
+    get lang() { return data.lang; },
+    get muted() { return data.muted; },
+    setMuted(on) {
+      data.muted = on;
+      persist();
+    },
+    setLang(code) {
+      data.lang = code;
+      persist();
+    },
+    setLevel(i) {
+      data.level = i;
+      persist();
+    },
+    // The grudge system (week 2) reads this: where and how the player died on each level.
+    recordDeath(levelId, x, y, cause) {
+      data.totalDeaths++;
+      const list = data.deaths[levelId] || (data.deaths[levelId] = []);
+      list.push({ x: Math.round(x), y: Math.round(y), cause });
+      if (list.length > MAX_DEATHS_PER_LEVEL) list.shift();
+      persist();
+    },
+    deathsFor(levelId) { return data.deaths[levelId] || []; },
+    memoryFor(levelId) { return data.memory[levelId] || { deaths: 0, active: [] }; },
+    setMemory(levelId, mem) {
+      data.memory[levelId] = mem;
+      persist();
+    },
+    reset() {
+      const { lang, muted } = data; // a new game keeps the player's settings
+      data = fresh();
+      data.lang = lang;
+      data.muted = muted;
+      persist();
+    },
+  };
+})(globalThis);
+
+// Level data. Each map is 24 columns by 13 rows.
+//   # solid   ^ v < > spikes   S spawn   D door   . empty
+// Actors use tile coordinates: c = column, r = row, w / h in tiles.
+// A trigger zone is [column, row, width, height] in tiles.
+// viewRow: on phones the empty sky above this row is cropped so the level can be drawn larger.
+(function (root) {
+  const G = root.Grudge;
+  const _ = '........................';
+  const F = '########################';
+
+  // Grudge slots: traps the level can add after you die. Each one is authored and checked by
+  // tests/solve.js in every allowed combination, so a grudge can be nasty but never impossible.
+  // near = the tile the player was last standing on when this slot becomes the best revenge.
+  const pop = (id, c, n, zone, r = 9, extra = {}) => ({
+    id, near: [c, r], ...extra,
+    add: [{ type: 'spike', c, r, n, dir: 'up', trig: { zone: [zone, 0, 1, r + 1] } }],
+  });
+  const drop = (id, c, w, zone, extra = {}) => ({
+    id, near: [c, 9], ...extra,
+    add: [{ type: 'crumble', c, r: 10, w, h: 3, delay: 0.04, trig: { zone: [zone, 5, 1, 5] } }],
+  });
+  const step = (id, c, r, w, delay = 0.3) => ({
+    id, near: [c + 1, r - 1],
+    add: [{ type: 'crumble', c, r, w, h: 1, delay, trig: { stand: true } }],
+  });
+  const shot = (id, row, zone) => ({
+    id, near: [zone, 9],
+    add: [{ type: 'mover', id: `${id}-b`, look: 'bullet', x: 980, y: row * 40 + 8, pxw: 44, pxh: 24, toPx: [-80, row * 40 + 8], speed: 430, hazard: true, cause: 'bullet', trig: { zone: [zone, 0, 1, 10] } }],
+  });
+
+  G.LEVELS = [
+    {
+      // The opening: the door will not open until you have died, and then the level starts using it.
+      id: 'first-steps',
+      viewRow: 4.5,
+      lock: 1,
+      say: 'firstMeet',
+      map: [_, _, _, _, _, _, _, _, _,
+        '..S..................D..',
+        F, F, F],
+      actors: [
+        { id: 'bait', type: 'spike', c: 11, r: 9, n: 1, dir: 'up', out: true },
+      ],
+      slots: [
+        pop('takeoff-a', 6, 2, 5, 9, { disable: ['bait'] }),
+        pop('takeoff-b', 9, 2, 8, 9, { disable: ['bait'] }),
+        drop('landing-a', 13, 2, 12, { disable: ['bait'] }),
+        pop('landing-b', 16, 2, 15, 9, { disable: ['bait'] }),
+      ],
+    },
+    {
+      id: 'honest-spikes',
+      viewRow: 4.5,
+      map: [_, _, _, _, _, _, _, _, _,
+        '..S.....^^...........D..',
+        F, F, F],
+      slots: [
+        pop('a', 5, 1, 4),
+        drop('b', 17, 2, 16),
+        pop('c', 19, 1, 18),
+      ],
+      actors: [
+        { type: 'spike', c: 12, r: 9, n: 3, dir: 'up', trig: { zone: [11.2, 0, 1, 10] } },
+      ],
+    },
+    {
+      id: 'low-ceiling',
+      viewRow: 3,
+      map: [F, F, F, F, _, _, _, _, _,
+        '..S..................D..',
+        F, F, F],
+      slots: [
+        pop('a', 10, 2, 9),
+        pop('b', 16, 1, 15),
+        pop('c', 20, 1, 19),
+        drop('d', 4, 2, 3.2),
+      ],
+      actors: [
+        { type: 'mover', look: 'crusher', c: 7, r: 4, w: 2, h: 2, to: [7, 8], speed: 1100, accel: 3000, delay: 0.12, solid: true, kill: true, cause: 'crush', trig: { zone: [6, 4, 1, 6] } },
+        { type: 'mover', look: 'crusher', c: 13, r: 4, w: 2, h: 2, to: [13, 8], speed: 1100, accel: 3000, delay: 0.12, solid: true, kill: true, cause: 'crush', trig: { zone: [12, 4, 1, 6] } },
+        { type: 'mover', look: 'crusher', c: 18, r: 4, w: 2, h: 2, to: [18, 8], speed: 1400, accel: 6000, delay: 0, solid: true, kill: true, cause: 'crush', trig: { zone: [16.6, 4, 1, 6] } },
+      ],
+    },
+    {
+      id: 'trust-issues',
+      viewRow: 3,
+      map: [_, _, _, _, _, _, _, _,
+        '........###.............',
+        '.S....................D.',
+        '######.........#########',
+        '######.........#########',
+        '######.........#########'],
+      slots: [
+        pop('a', 3, 1, 2.2),
+        step('b', 8, 8, 3),
+        pop('c', 17, 2, 16),
+        drop('d', 19, 2, 18),
+      ],
+      actors: [
+        { type: 'ghost', c: 8, r: 10, w: 3, h: 1 },
+        { type: 'hidden', c: 12, r: 4, w: 1, h: 1 },
+      ],
+    },
+    {
+      id: 'cold-feet',
+      viewRow: 1,
+      map: [_, _,
+        '..D.....................',
+        '.###....................',
+        '.....###................',
+        _,
+        '..........###...........',
+        _,
+        '...............###......',
+        '..S....^^^..............',
+        F, F, F],
+      slots: [
+        step('a', 15, 8, 3),
+        step('b', 10, 6, 3),
+        pop('c', 5, 1, 6, 3),
+        pop('d', 5, 1, 4),
+      ],
+      actors: [],
+    },
+    {
+      id: 'keep-moving',
+      viewRow: 3.5,
+      map: [_, _, _, _, _, _, _, _,
+        '.................##.....',
+        '..S....^.........##...D.',
+        '############..##.#######',
+        '############..##.#######',
+        '############..##.#######'],
+      slots: [
+        pop('a', 5, 1, 4),
+        pop('b', 21, 1, 20),
+        pop('c', 20, 1, 19),
+      ],
+      actors: [
+        { type: 'mover', look: 'wall', x: -44, y: 0, pxw: 44, pxh: 520, toPx: [1000, 0], speed: 170, delay: 0.1, hazard: true, cause: 'wall', trig: { zone: [4, 0, 1, 10] } },
+        { type: 'crumble', c: 16, r: 10, w: 1, h: 3, delay: 0.02, trig: { zone: [15, 5, 1, 5] } },
+      ],
+    },
+    {
+      id: 'wrong-way',
+      viewRow: 4.5,
+      map: [_, _, _, _, _, _, _, _, _,
+        '..S...........^..^^...D.',
+        F, F, F],
+      slots: [
+        pop('a', 5, 1, 4),
+        pop('b', 11, 1, 10),
+        pop('c', 20, 1, 19),
+      ],
+      actors: [
+        { type: 'pad', kind: 'reverse', c: 9, r: 0, w: 1, h: 10 },
+      ],
+    },
+    {
+      id: 'other-floor',
+      viewRow: 3.5,
+      map: [
+        '#############..#########',
+        '#############..#########',
+        '#############..#########',
+        '#############..#########',
+        '#############..#########',
+        '..........v......v......',
+        _, _, _,
+        '..S...................D.',
+        '########..........######',
+        '########..........######',
+        '########..........######'],
+      slots: [
+        pop('a', 4, 1, 3),
+        pop('b', 20, 1, 19),
+        { id: 'c', near: [15, 6], add: [{ type: 'spike', c: 15, r: 5, n: 1, dir: 'down', trig: { zone: [14, 5, 1, 5] } }] },
+      ],
+      actors: [
+        { type: 'pad', kind: 'flip', c: 6, r: 9, w: 1, h: 1, side: 'floor' },
+        { type: 'pad', kind: 'flip', c: 19, r: 5, w: 1, h: 1, side: 'ceil' },
+        { type: 'crumble', c: 13, r: 0, w: 2, h: 5, dir: -1, delay: 0.02, trig: { zone: [12, 5, 1, 5] } },
+      ],
+    },
+    {
+      id: 'free-ride',
+      viewRow: 4.5,
+      map: [_, _, _, _, _, _, _, _, _,
+        '..S...................D.',
+        '####................####',
+        '####................####',
+        '####^^^^^^^^^^^^^^^^####'],
+      slots: [
+        pop('a', 3, 1, 2.6),
+        pop('b', 21, 1, 20),
+        shot('c', 8, 12),
+      ],
+      actors: [
+        { type: 'mover', id: 'ride', look: 'platform', c: 4, r: 10, w: 3, h: 1, to: [15, 10], speed: 170, solid: true, fallEnd: 0.7, trig: { stand: true } },
+        { type: 'mover', id: 'low', look: 'bullet', x: 980, y: 368, pxw: 44, pxh: 24, toPx: [-80, 368], speed: 430, hazard: true, cause: 'bullet', trig: { zone: [8, 0, 1, 10] } },
+        { type: 'mover', id: 'high', look: 'bullet', x: 980, y: 288, pxw: 44, pxh: 24, toPx: [-80, 288], speed: 430, delay: 0.7, hazard: true, cause: 'bullet', trig: { after: 'low' } },
+      ],
+    },
+    {
+      id: 'final-exam',
+      viewRow: 2,
+      map: [
+        '..................####..',
+        '..................####..',
+        '..................####..',
+        '..................####..',
+        _, _,
+        '..............###.......',
+        _, _,
+        '..S...................D.',
+        '###########...##########',
+        '###########...##########',
+        '###########...##########'],
+      door: { run: [{ zone: [21, 0, 1, 10], to: [15, 5] }] },
+      slots: [
+        pop('a', 5, 2, 4),
+        pop('b', 10, 1, 9),
+        shot('c', 8, 17),
+      ],
+      actors: [
+        { type: 'door', fake: true, c: 8, r: 9 },
+        { type: 'ghost', c: 11, r: 10, w: 3, h: 1 },
+        { type: 'spike', c: 16, r: 9, n: 2, dir: 'up', trig: { zone: [15, 0, 1, 10] } },
+        { type: 'mover', look: 'crusher', c: 19, r: 4, w: 2, h: 2, to: [19, 8], speed: 1100, accel: 3000, delay: 0.12, solid: true, kill: true, cause: 'crush', trig: { zone: [18, 4, 1, 6] } },
+      ],
+    },
+  ];
+})(globalThis);
+
+// Game simulation. No DOM and no randomness, so the same inputs always give the same result.
+// The whole state is plain JSON, which lets the level solver in tests/ clone and search it.
+(function (root) {
+  const G = root.Grudge;
+  const C = G.CFG;
+  const compiled = new Map();
+
+  const overlap = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+
+  function compile(index) {
+    if (compiled.has(index)) return compiled.get(index);
+    const def = G.LEVELS[index];
+    if (def.map.length !== C.ROWS) throw new Error(`${def.id}: expected ${C.ROWS} rows, got ${def.map.length}`);
+    const lv = { def, solid: [], spikes: [], spawn: null, door: null };
+    def.map.forEach((row, r) => {
+      if (row.length !== C.COLS) throw new Error(`${def.id}: row ${r} has ${row.length} columns`);
+      const line = [];
+      for (let c = 0; c < C.COLS; c++) {
+        const ch = row[c];
+        line.push(ch === '#');
+        if (ch === 'S') lv.spawn = { c, r };
+        if (ch === 'D') lv.door = { c, r };
+        if ('^v<>'.includes(ch)) lv.spikes.push(spikeCell(c, r, ch));
+      }
+      lv.solid.push(line);
+    });
+    if (!lv.spawn || !lv.door) throw new Error(`${def.id}: needs S and D`);
+    compiled.set(index, lv);
+    return lv;
+  }
+
+  function spikeCell(c, r, ch) {
+    const x = c * C.T, y = r * C.T;
+    const dir = { '^': 'up', v: 'down', '<': 'left', '>': 'right' }[ch];
+    const hit = {
+      up: { x: x + 7, y: y + 14, w: 26, h: 26 },
+      down: { x: x + 7, y, w: 26, h: 26 },
+      left: { x: x + 14, y: y + 7, w: 26, h: 26 },
+      right: { x, y: y + 7, w: 26, h: 26 },
+    }[dir];
+    return { x, y, dir, hit };
+  }
+
+  const doorRect = (c, r) => ({ x: c * C.T + 2, y: (r + 1) * C.T - 56, w: 36, h: 56 });
+  const zoneRect = (z) => ({ x: z[0] * C.T, y: z[1] * C.T, w: z[2] * C.T, h: z[3] * C.T });
+
+  function buildActor(def, i) {
+    const a = {
+      id: def.id || `a${i}`, type: def.type, state: 'idle', t: 0,
+      dx: 0, dy: 0, px: 0, py: 0, vy: 0, v: 0, fired: false,
+      solid: false, hazard: false, kill: false, cause: def.cause || 'spike',
+      look: def.look || null, trig: def.trig || null, delay: def.delay || 0,
+      grudge: !!def.grudge,
+    };
+    if (def.pxw) {
+      Object.assign(a, { x: def.x, y: def.y, w: def.pxw, h: def.pxh });
+    } else if (def.type !== 'door') {
+      Object.assign(a, { x: def.c * C.T, y: def.r * C.T, w: (def.w || def.n || 1) * C.T, h: (def.h || 1) * C.T });
+    }
+    switch (def.type) {
+      case 'crumble':
+        a.solid = true;
+        a.dir = def.dir || 1;
+        break;
+      case 'ghost':
+        a.revealed = false;
+        break;
+      case 'hidden':
+        a.revealed = false;
+        break;
+      case 'spike':
+        a.dir = def.dir;
+        a.prog = def.out ? 1 : 0;
+        a.out = !!def.out;
+        if (def.out) {
+          a.state = 'wait';
+          a.hazard = true;
+        }
+        break;
+      case 'mover':
+        a.solid = !!def.solid;
+        a.kill = !!def.kill;
+        a.hazard = !!def.hazard;
+        a.to = def.toPx ? { x: def.toPx[0], y: def.toPx[1] } : { x: def.to[0] * C.T, y: def.to[1] * C.T };
+        a.speed = def.speed;
+        a.accel = def.accel || 0;
+        a.fallEnd = def.fallEnd || 0;
+        break;
+      case 'pad':
+        a.kind = def.kind;
+        a.side = def.side || null;
+        a.armed = true;
+        break;
+      case 'door':
+        Object.assign(a, doorRect(def.c, def.r));
+        a.fake = !!def.fake;
+        a.real = !def.fake;
+        a.cause = 'mimic';
+        a.legs = def.legs || [];
+        a.leg = 0;
+        break;
+    }
+    a.px = a.x;
+    a.py = a.y;
+    return a;
+  }
+
+  // memory = what the level holds against the player: { deaths, active: [slot ids] }.
+  function create(index, memory) {
+    const lv = compile(index);
+    const def = lv.def;
+    const mem = memory || { deaths: 0, active: [] };
+    const slots = (def.slots || []).filter((sl) => mem.active.includes(sl.id));
+    const disabled = new Set(slots.flatMap((sl) => sl.disable || []));
+    const holes = {};
+    const defs = def.actors.filter((a) => !a.id || !disabled.has(a.id));
+    for (const sl of slots) {
+      for (const add of sl.add) {
+        defs.push({ ...add, grudge: true });
+        // A trap made of floor replaces the real floor underneath it.
+        if (add.type === 'crumble' || add.type === 'ghost') {
+          for (let r = add.r; r < add.r + add.h; r++) {
+            for (let c = add.c; c < add.c + add.w; c++) holes[`${c},${r}`] = 1;
+          }
+        }
+      }
+    }
+    const actors = defs.map(buildActor);
+    actors.push(buildActor({
+      type: 'door', id: 'door', c: lv.door.c, r: lv.door.r,
+      legs: def.door && def.door.run ? def.door.run : [],
+    }, actors.length));
+    const x = lv.spawn.c * C.T + (C.T - C.PW) / 2;
+    const y = (lv.spawn.r + 1) * C.T - C.PH;
+    return {
+      index, tick: 0, status: 'play', cause: null, killer: null, events: [], actors, holes,
+      locked: !!def.lock && mem.deaths < def.lock, lockTouch: false,
+      player: {
+        x, y, px: x, py: y, vx: 0, vy: 0, g: 1, grounded: true, ride: null, rideVx: 0,
+        coyote: 0, buffer: 0, jumpHeld: false, rising: false, face: 1, reverse: false, safeX: x + C.PW / 2, safeY: y + C.PH,
+      },
+    };
+  }
+
+  function findSolid(s, lv, x, y, w, h, skip) {
+    const c0 = Math.floor(x / C.T), c1 = Math.floor((x + w - 0.001) / C.T);
+    const r0 = Math.floor(y / C.T), r1 = Math.floor((y + h - 0.001) / C.T);
+    for (let r = Math.max(r0, 0); r <= Math.min(r1, C.ROWS - 1); r++) {
+      for (let c = Math.max(c0, 0); c <= Math.min(c1, C.COLS - 1); c++) {
+        if (lv.solid[r][c] && !s.holes[`${c},${r}`]) return { x: c * C.T, y: r * C.T, w: C.T, h: C.T, actor: null };
+      }
+    }
+    const box = { x, y, w, h };
+    for (const a of s.actors) {
+      if (a.solid && a !== skip && overlap(box, a)) return { x: a.x, y: a.y, w: a.w, h: a.h, actor: a };
+    }
+    return null;
+  }
+
+  function moveX(s, lv, dx, skip) {
+    if (!dx) return false;
+    const p = s.player;
+    p.x += dx;
+    let hit = false;
+    for (let i = 0; i < 4; i++) {
+      const b = findSolid(s, lv, p.x, p.y, C.PW, C.PH, skip);
+      if (!b) break;
+      hit = true;
+      p.x = dx > 0 ? b.x - C.PW : b.x + b.w;
+    }
+    if (p.x < 0) { p.x = 0; hit = true; }
+    if (p.x > C.W - C.PW) { p.x = C.W - C.PW; hit = true; }
+    return hit;
+  }
+
+  // Returns the box it hit, if any.
+  function moveY(s, lv, dy, skip) {
+    if (!dy) return null;
+    const p = s.player;
+    p.y += dy;
+    // An invisible block only exists once it is bumped from the "head" side.
+    if (dy * p.g < 0) {
+      const box = { x: p.x, y: p.y, w: C.PW, h: C.PH };
+      for (const a of s.actors) {
+        if (a.type === 'hidden' && !a.revealed && overlap(box, a)) {
+          a.revealed = true;
+          a.solid = true;
+          s.events.push({ type: 'reveal', x: a.x + a.w / 2, y: a.y + a.h / 2 });
+        }
+      }
+    }
+    let last = null;
+    for (let i = 0; i < 4; i++) {
+      const b = findSolid(s, lv, p.x, p.y, C.PW, C.PH, skip);
+      if (!b) break;
+      last = b;
+      p.y = dy > 0 ? b.y - C.PH : b.y + b.h;
+    }
+    return last;
+  }
+
+  function die(s, cause, killer) {
+    if (s.status !== 'play') return;
+    s.status = 'dead';
+    s.cause = cause;
+    s.killer = killer || null;
+    s.events.push({ type: 'die', cause, x: s.player.x + C.PW / 2, y: s.player.y + C.PH / 2 });
+  }
+
+  function spikeHit(a) {
+    const inset = 6, tip = 14;
+    const f = a.prog;
+    if (a.dir === 'up') return { x: a.x + inset, y: a.y + a.h - (a.h - tip) * f, w: a.w - inset * 2, h: (a.h - tip) * f };
+    return { x: a.x + inset, y: a.y, w: a.w - inset * 2, h: (a.h - tip) * f };
+  }
+
+  function triggered(s, a, box) {
+    const tr = a.trig;
+    if (!tr) return false;
+    if (tr.zone) return overlap(box, zoneRect(tr.zone));
+    if (tr.stand) return s.player.ride === a.id;
+    if (tr.after) {
+      const other = s.actors.find((o) => o.id === tr.after);
+      return !!other && other.fired;
+    }
+    return false;
+  }
+
+  function updateActors(s, lv, dt) {
+    const p = s.player;
+    const box = { x: p.x, y: p.y, w: C.PW, h: C.PH };
+    for (const a of s.actors) {
+      a.px = a.x;
+      a.py = a.y;
+      a.dx = 0;
+      a.dy = 0;
+      if (a.state === 'idle' && a.trig && triggered(s, a, box)) {
+        a.state = 'wait';
+        a.t = a.delay;
+        a.fired = true;
+        s.events.push({ type: 'trigger', actor: a.id, grudge: a.grudge, look: a.look || a.type, x: a.x + (a.w || 0) / 2, y: a.y + (a.h || 0) / 2 });
+      }
+      switch (a.type) {
+        case 'crumble':
+          if (a.state === 'wait' && (a.t -= dt) <= 0) a.state = 'fall';
+          if (a.state === 'fall') stepFall(a, dt, a.dir);
+          break;
+        case 'spike':
+          if (a.state === 'wait') {
+            a.prog = Math.min(1, a.prog + dt / 0.07);
+            a.hazard = a.prog > 0.4;
+          }
+          break;
+        case 'mover':
+          stepMover(s, a, dt);
+          break;
+        case 'door':
+          stepDoor(s, a, dt, box);
+          break;
+        case 'ghost':
+          if (!a.revealed && overlap(box, a)) {
+            a.revealed = true;
+            s.events.push({ type: 'reveal', x: p.x + C.PW / 2, y: a.y + a.h / 2, wide: a.w });
+          }
+          break;
+        case 'pad': {
+          const on = overlap(box, a);
+          if (on && a.armed) {
+            a.armed = false;
+            if (a.kind === 'flip') {
+              p.g = -p.g;
+              p.vy *= 0.3;
+              p.grounded = false;
+              p.ride = null;
+              s.events.push({ type: 'flip', x: p.x + C.PW / 2, y: p.y + C.PH / 2 });
+            } else if (a.kind === 'reverse' && !p.reverse) {
+              p.reverse = true;
+              s.events.push({ type: 'reverse', x: p.x + C.PW / 2, y: p.y + C.PH / 2 });
+            }
+          } else if (!on) {
+            a.armed = true;
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  function stepFall(a, dt, dir) {
+    a.vy = Math.min(a.vy + 2200 * dt, 900);
+    a.dy = a.vy * dt * dir;
+    a.y += a.dy;
+    if (a.y > C.H + 60 || a.y + a.h < -60) {
+      a.state = 'gone';
+      a.solid = false;
+    }
+  }
+
+  function stepMover(s, a, dt) {
+    if (a.state === 'wait' && (a.t -= dt) <= 0) {
+      a.state = 'move';
+      a.v = a.accel ? 0 : a.speed;
+    }
+    if (a.state === 'move') {
+      if (a.accel) a.v = Math.min(a.speed, a.v + a.accel * dt);
+      const ax = a.to.x - a.x, ay = a.to.y - a.y;
+      const dist = Math.hypot(ax, ay);
+      const stepLen = a.v * dt;
+      if (dist <= stepLen) {
+        a.dx = ax;
+        a.dy = ay;
+        a.x = a.to.x;
+        a.y = a.to.y;
+        s.events.push({ type: 'moverEnd', look: a.look, x: a.x + a.w / 2, y: a.y + a.h });
+        if (a.fallEnd) {
+          a.state = 'endwait';
+          a.t = a.fallEnd;
+        } else {
+          a.state = 'done';
+          if (a.look === 'bullet' || a.look === 'wall') a.hazard = false;
+        }
+      } else {
+        a.dx = (ax / dist) * stepLen;
+        a.dy = (ay / dist) * stepLen;
+        a.x += a.dx;
+        a.y += a.dy;
+      }
+    } else if (a.state === 'endwait' && (a.t -= dt) <= 0) {
+      a.state = 'fall';
+    } else if (a.state === 'fall') {
+      stepFall(a, dt, 1);
+    }
+  }
+
+  function stepDoor(s, a, dt, box) {
+    if (a.state === 'idle') {
+      const leg = a.legs[a.leg];
+      if (leg && overlap(box, zoneRect(leg.zone))) {
+        a.state = 'run';
+        a.target = doorRect(leg.to[0], leg.to[1]);
+        s.events.push({ type: 'doorRun', x: a.x + a.w / 2, y: a.y + a.h / 2 });
+      }
+    } else if (a.state === 'run') {
+      const ax = a.target.x - a.x, ay = a.target.y - a.y;
+      const dist = Math.hypot(ax, ay);
+      const stepLen = 1100 * dt;
+      if (dist <= stepLen) {
+        a.x = a.target.x;
+        a.y = a.target.y;
+        a.leg++;
+        a.state = 'idle';
+        s.events.push({ type: 'doorStop', x: a.x + a.w / 2, y: a.y + a.h });
+      } else {
+        a.x += (ax / dist) * stepLen;
+        a.y += (ay / dist) * stepLen;
+      }
+    }
+  }
+
+  function carryAndCrush(s, lv) {
+    const p = s.player;
+    const rider = p.ride && s.actors.find((a) => a.id === p.ride);
+    if (rider && (rider.dx || rider.dy)) {
+      moveX(s, lv, rider.dx, rider);
+      moveY(s, lv, rider.dy, rider);
+    }
+    p.rideVx = rider ? rider.dx / C.STEP : 0;
+    const box = { x: p.x, y: p.y, w: C.PW, h: C.PH };
+    for (const a of s.actors) {
+      if (!a.solid || a === rider || (!a.dx && !a.dy) || !overlap(box, a)) continue;
+      if (a.kill) return die(s, a.cause, a.id);
+      moveX(s, lv, a.dx, a);
+      moveY(s, lv, a.dy, a);
+      if (findSolid(s, lv, p.x, p.y, C.PW, C.PH, null)) return die(s, 'crush', a.id);
+    }
+  }
+
+  function updatePlayer(s, lv, input, dt) {
+    const p = s.player;
+    const wasGrounded = p.grounded;
+
+    let left = !!input.left, right = !!input.right;
+    if (p.reverse) [left, right] = [right, left];
+    const dir = (right ? 1 : 0) - (left ? 1 : 0);
+    if (dir) p.face = dir;
+
+    // Turning on the ground is instant: no sliding the wrong way first.
+    if (p.grounded && dir && p.vx * dir < 0) p.vx = 0;
+    const rate = p.grounded ? (dir ? C.groundAccel : C.groundFric) : (dir ? C.airAccel : C.airFric);
+    const target = dir * C.runSpeed;
+    p.vx += Math.sign(target - p.vx) * Math.min(Math.abs(target - p.vx), rate * dt);
+
+    if (input.jump && !p.jumpHeld) p.buffer = C.buffer;
+    else p.buffer = Math.max(0, p.buffer - dt);
+
+    if (p.grounded) p.coyote = C.coyote;
+    else p.coyote = Math.max(0, p.coyote - dt);
+
+    if (p.buffer > 0 && p.coyote > 0) {
+      p.vy = -C.jumpVel * p.g;
+      p.vx += p.rideVx;
+      p.grounded = false;
+      p.ride = null;
+      p.coyote = 0;
+      p.buffer = 0;
+      p.rising = true;
+      s.events.push({ type: 'jump', x: p.x + C.PW / 2, y: p.g > 0 ? p.y + C.PH : p.y, g: p.g });
+    }
+    if (p.rising && !input.jump && p.vy * p.g < 0) {
+      p.vy *= C.jumpCut;
+      p.rising = false;
+    }
+    if (p.vy * p.g >= 0) p.rising = false;
+    p.jumpHeld = !!input.jump;
+
+    const falling = p.vy * p.g > 0;
+    p.vy += C.gravity * (falling ? C.fallMult : 1) * p.g * dt;
+    if (p.vy * p.g > C.maxFall) p.vy = C.maxFall * p.g;
+
+    if (moveX(s, lv, p.vx * dt, null)) p.vx = 0;
+
+    const impact = p.vy;
+    p.grounded = false;
+    p.ride = null;
+    const hit = moveY(s, lv, p.vy * dt, null);
+    if (hit) {
+      if (impact * p.g > 0) {
+        p.grounded = true;
+        p.ride = hit.actor ? hit.actor.id : null;
+        p.safeX = p.x + C.PW / 2;
+        p.safeY = p.g > 0 ? p.y + C.PH : p.y;
+        if (!wasGrounded) {
+          s.events.push({ type: 'land', x: p.x + C.PW / 2, y: p.g > 0 ? p.y + C.PH : p.y, g: p.g, force: Math.abs(impact) });
+        }
+      } else {
+        s.events.push({ type: 'bonk', x: p.x + C.PW / 2, y: p.g > 0 ? p.y : p.y + C.PH });
+        p.rising = false;
+      }
+      p.vy = 0;
+    }
+  }
+
+  function checkOutcomes(s, lv) {
+    const p = s.player;
+    const hurt = { x: p.x + 3, y: p.y + 3, w: C.PW - 6, h: C.PH - 6 };
+    for (const sp of lv.spikes) {
+      if (overlap(hurt, sp.hit)) return die(s, 'spike', null);
+    }
+    for (const a of s.actors) {
+      if (a.type === 'spike' && a.hazard && overlap(hurt, spikeHit(a))) return die(s, a.out ? 'spike' : 'popspike', a.id);
+      if (a.type === 'mover' && a.hazard && a.state === 'move' && overlap(hurt, a)) return die(s, a.cause, a.id);
+      if (a.type === 'door' && a.fake && overlap(hurt, a)) return die(s, 'mimic', a.id);
+    }
+    if (p.y > C.H + 30 || p.y + C.PH < -30) return die(s, 'pit', null);
+
+    const door = s.actors.find((a) => a.id === 'door');
+    if (door.state === 'idle') {
+      const cx = p.x + C.PW / 2, cy = p.y + C.PH / 2;
+      if (cx > door.x && cx < door.x + door.w && cy > door.y && cy < door.y + door.h) {
+        if (s.locked) {
+          if (!s.lockTouch) s.events.push({ type: 'doorLocked', x: door.x + door.w / 2, y: door.y + door.h / 2 });
+          s.lockTouch = true;
+        } else {
+          s.status = 'won';
+          s.events.push({ type: 'win', x: door.x + door.w / 2, y: door.y + door.h / 2 });
+        }
+      } else {
+        s.lockTouch = false;
+      }
+    }
+  }
+
+  function step(s, input) {
+    if (s.status !== 'play') return s;
+    const lv = compile(s.index);
+    const dt = C.STEP;
+    s.events = [];
+    s.tick++;
+    const p = s.player;
+    p.px = p.x;
+    p.py = p.y;
+    updateActors(s, lv, dt);
+    carryAndCrush(s, lv);
+    if (s.status !== 'play') return s;
+    updatePlayer(s, lv, input, dt);
+    checkOutcomes(s, lv);
+    return s;
+  }
+
+  G.Sim = { create, step, compile, spikeHit };
+})(globalThis);
+
+// The grudge: decides what the level does about your last death, and what the narrator says about it.
+// Revenge goes where you last felt safe: the slot closest to the last ground you stood on.
+(function (root) {
+  const G = root.Grudge;
+  const C = G.CFG;
+  const MAX_ACTIVE = 2; // tests/solve.js verifies every combination up to this size
+
+  const pickFrom = (list) => list[Math.floor(Math.random() * list.length)];
+  const lineFrom = (pool) => G.t(pickFrom(G.LINES[pool] || G.LINES.spike));
+
+  function chooseSlot(def, mem, safeX, safeY) {
+    const free = (def.slots || []).filter((sl) => !mem.active.includes(sl.id));
+    if (!free.length) return null;
+    const dist = (sl) => Math.hypot((sl.near[0] + 0.5) * C.T - safeX, (sl.near[1] + 1) * C.T - safeY);
+    return free.reduce((best, sl) => (dist(sl) < dist(best) ? sl : best));
+  }
+
+  G.Grudge = Object.assign(G.Grudge || {}, {
+    MAX_ACTIVE,
+
+    // Updates what the level holds against the player. Returns the narrator's line.
+    onDeath(def, sim) {
+      const mem = G.Save.memoryFor(def.id);
+      const next = { deaths: mem.deaths + 1, active: mem.active.slice() };
+      const slot = chooseSlot(def, next, sim.player.safeX, sim.player.safeY);
+      if (slot) {
+        next.active.push(slot.id);
+        if (next.active.length > MAX_ACTIVE) next.active.shift(); // old trap out, new trap in
+      }
+      G.Save.setMemory(def.id, next);
+      if (def.lock && next.deaths === def.lock) return G.t('firstNote');
+      return lineFrom(sim.cause);
+    },
+
+    openingLine(def, mem) {
+      if (!def.say || mem.deaths > 0) return null;
+      return G.t(def.say);
+    },
+    rememberLine() {
+      return lineFrom('remember');
+    },
+    lockedLine() {
+      return lineFrom('locked');
+    },
+  });
+})(globalThis);
+
+// Platform SDK wrapper for Poki and CrazyGames. The build decides which SDK script index.html loads;
+// this file works with either, or with none (local play, ad blockers), so every call is guarded.
+// It also enforces the rule both sites share: gameplay start/stop never fire twice in a row.
+// Kept under the name G.Poki because the rest of the game already calls it that.
+(function (root) {
+  const G = root.Grudge;
+  const poki = () => root.PokiSDK || null;
+  // CrazyGames' SDK throws on unknown domains ("disabled"), so it only counts once init worked.
+  let cg = null;
+  let playing = false;
+  let shareUrl = '';
+  let hostMuted = false;
+  // CrazyGames ignores a start or stop sent within a second of the previous one ("throttled").
+  // A quick stop-then-start (a level clear with no ad) is held back and only the last state is sent.
+  let cgSent = false;
+  let cgLast = -1e9;
+  let cgTimer = 0;
+  function cgSync() {
+    cgTimer = 0;
+    if (!cg || cgSent === playing) return;
+    const wait = cgLast + 1100 - Date.now();
+    if (wait > 0) {
+      cgTimer = root.setTimeout(cgSync, wait);
+      return;
+    }
+    cgSent = playing;
+    cgLast = Date.now();
+    safe(() => (playing ? cg.game.gameplayStart() : cg.game.gameplayStop()));
+  }
+
+  const safe = (fn) => {
+    try {
+      return fn();
+    } catch (e) {
+      return undefined;
+    }
+  };
+
+  function useLang(lang) {
+    if (G.Save.lang || !G.Lang.CODES.includes(lang)) return; // a language the player picked wins
+    G.LANG = lang;
+    if (root.document) root.document.documentElement.lang = lang;
+  }
+
+  async function initPoki(s) {
+    try {
+      await s.init();
+    } catch (e) {
+      // Poki's guidance: load the game anyway.
+    }
+    useLang(safe(() => s.getLanguage()));
+    safe(() => s.gameLoadingFinished());
+    // Fetched now because the share button needs it instantly, inside the player's click.
+    try {
+      const url = (await s.shareableURL({})) || '';
+      // Off Poki the SDK echoes the current address; a local one is useless to a friend.
+      shareUrl = /^https?:\/\/(localhost|127\.|\[::1\])/.test(url) ? '' : url;
+    } catch (e) {
+      shareUrl = '';
+    }
+  }
+
+  async function initCrazy(s) {
+    try {
+      await s.init();
+    } catch (e) {
+      return;
+    }
+    if (safe(() => s.environment) === 'disabled') return;
+    cg = s;
+    safe(() => s.game.loadingStart());
+    const info = safe(() => s.user.systemInfo) || {};
+    useLang(String(info.locale || '').slice(0, 2).toLowerCase());
+    // CrazyGames asks for its device type instead of guessing phones from touch support.
+    const type = info.device && info.device.type;
+    if (type === 'mobile' || type === 'tablet') G.Touch.enable();
+    const apply = (settings) => {
+      hostMuted = !!(settings && settings.muteAudio);
+      G.Audio.refresh();
+    };
+    apply(safe(() => s.game.settings));
+    safe(() => s.game.addSettingsChangeListener(apply));
+    safe(() => s.game.loadingStop());
+  }
+
+  G.Poki = {
+    get shareUrl() { return shareUrl; },
+    get playing() { return playing; },
+    // True only on Poki, where its pill button sits over the top centre on touch screens.
+    get hasPill() { return !!poki(); },
+    // The site has switched the sound off; this beats the in-game sound button.
+    get hostMuted() { return hostMuted; },
+    get site() { return poki() ? 'poki' : cg ? 'crazygames' : 'none'; },
+
+    async init() {
+      if (poki()) return initPoki(poki());
+      const crazy = root.CrazyGames && root.CrazyGames.SDK;
+      if (crazy) return initCrazy(crazy);
+      return undefined;
+    },
+    start() {
+      if (playing) return;
+      playing = true;
+      if (poki()) safe(() => poki().gameplayStart());
+      else if (cg && !cgTimer) cgSync();
+    },
+    // `focusLost`: the tab or window lost focus. CrazyGames tracks that itself and asks games not
+    // to report it, so there the game pauses but stays "playing" for the SDK.
+    stop(focusLost) {
+      if (!playing) return;
+      if (cg && focusLost) return;
+      playing = false;
+      if (poki()) safe(() => poki().gameplayStop());
+      else if (cg && !cgTimer) cgSync();
+    },
+    // Resolves when play can continue; the site decides whether an ad actually shows.
+    // `when` is 'level' (between levels) or 'resume' (closing the pause screen). Poki wants
+    // breaks on resume; CrazyGames allows them only at level changes.
+    commercialBreak(onAdStart, when) {
+      const s = poki();
+      if (s) {
+        try {
+          return Promise.resolve(s.commercialBreak(onAdStart)).catch(() => {});
+        } catch (e) {
+          return Promise.resolve();
+        }
+      }
+      if (cg && when === 'level') {
+        return new Promise((resolve) => {
+          const done = () => resolve();
+          try {
+            cg.ad.requestAd('midgame', { adStarted: onAdStart, adFinished: done, adError: done });
+          } catch (e) {
+            resolve();
+          }
+        });
+      }
+      return Promise.resolve();
+    },
+  };
+})(globalThis);
+
+// Sound effects, synthesised in code with Web Audio: no sound files, so the download stays tiny.
+// Browsers only allow sound after a player action, so the context starts on the first key or tap.
+(function (root) {
+  const G = root.Grudge;
+  let ctx = null;
+  let out = null; // master gain
+  let adMuted = false;
+  let focused = true;
+  let lastLand = -1;
+  let blipCount = 0;
+  const VOLUME = 0.55;
+
+  const muted = () => G.Save.muted || adMuted || !focused || G.Poki.hostMuted;
+
+  function applyVolume() {
+    if (out) out.gain.setTargetAtTime(muted() ? 0 : VOLUME, ctx.currentTime, 0.01);
+  }
+
+  // Old webkitAudioContext.resume() returns nothing, so the promise is optional.
+  function wake() {
+    try {
+      const r = ctx.resume();
+      if (r && r.catch) r.catch(() => {});
+    } catch (e) {
+      // Sound must never break the game.
+    }
+  }
+
+  function unlock() {
+    try {
+      if (!ctx) {
+        const AC = root.AudioContext || root.webkitAudioContext;
+        if (!AC) return;
+        ctx = new AC();
+        out = ctx.createGain();
+        out.gain.value = muted() ? 0 : VOLUME;
+        // Keeps several sounds at once from clipping.
+        const limiter = ctx.createDynamicsCompressor();
+        out.connect(limiter);
+        limiter.connect(ctx.destination);
+        // Older iOS Safari only unlocks after a sound actually starts inside the tap.
+        const src = ctx.createBufferSource();
+        src.buffer = ctx.createBuffer(1, 1, 22050);
+        src.connect(ctx.destination);
+        src.start(0);
+      }
+      // iOS also uses 'interrupted' (after a call, or coming back from the background).
+      if (ctx.state !== 'running') wake();
+    } catch (e) {
+      ctx = null;
+    }
+  }
+
+  // --- building blocks; `a` is the audio context, `dest` where the sound goes ---
+  function tone(a, dest, type, from, to, dur, vol, delay = 0) {
+    const t = a.currentTime + delay;
+    const o = a.createOscillator();
+    const g = a.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(from, t);
+    o.frequency.exponentialRampToValueAtTime(Math.max(20, to), t + dur);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + Math.min(0.008, dur / 4));
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g);
+    g.connect(dest);
+    o.start(t);
+    o.stop(t + dur + 0.02);
+  }
+
+  function noise(a, dest, dur, vol, filterType, from, to, delay = 0) {
+    const t = a.currentTime + delay;
+    const len = Math.max(1, Math.floor(a.sampleRate * dur));
+    const buf = a.createBuffer(1, len, a.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+    const s = a.createBufferSource();
+    s.buffer = buf;
+    const f = a.createBiquadFilter();
+    f.type = filterType;
+    f.frequency.setValueAtTime(from, t);
+    f.frequency.exponentialRampToValueAtTime(Math.max(30, to), t + dur);
+    const g = a.createGain();
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    s.connect(f);
+    f.connect(g);
+    g.connect(dest);
+    s.start(t);
+    s.stop(t + dur + 0.02);
+  }
+
+  const SOUNDS = {
+    jump: (a, d) => tone(a, d, 'square', 240, 520, 0.11, 0.13),
+    land: (a, d) => noise(a, d, 0.06, 0.6, 'lowpass', 900, 250),
+    bonk: (a, d) => tone(a, d, 'triangle', 190, 90, 0.09, 0.3),
+    // Toast dying: a crunch, then a sad falling note.
+    die: (a, d) => {
+      noise(a, d, 0.2, 0.55, 'bandpass', 3200, 500);
+      noise(a, d, 0.1, 0.3, 'highpass', 2500, 1500, 0.05);
+      tone(a, d, 'sawtooth', 340, 70, 0.3, 0.16, 0.03);
+    },
+    crush: (a, d) => {
+      tone(a, d, 'sine', 130, 38, 0.3, 0.7);
+      noise(a, d, 0.2, 0.5, 'lowpass', 1400, 120);
+    },
+    pit: (a, d) => tone(a, d, 'sine', 620, 110, 0.38, 0.22),
+    spikeOut: (a, d) => {
+      noise(a, d, 0.09, 0.28, 'highpass', 3500, 6500);
+      tone(a, d, 'triangle', 1250, 1900, 0.07, 0.14);
+    },
+    crumble: (a, d) => {
+      noise(a, d, 0.34, 0.42, 'lowpass', 1100, 140);
+      noise(a, d, 0.12, 0.18, 'bandpass', 2600, 900, 0.04);
+    },
+    rumble: (a, d) => {
+      noise(a, d, 0.5, 0.42, 'lowpass', 340, 90);
+      tone(a, d, 'sawtooth', 58, 44, 0.5, 0.2);
+    },
+    clunk: (a, d) => tone(a, d, 'square', 170, 100, 0.08, 0.17),
+    thud: (a, d) => {
+      tone(a, d, 'sine', 110, 34, 0.32, 0.8);
+      noise(a, d, 0.14, 0.45, 'lowpass', 800, 100);
+    },
+    whoosh: (a, d) => noise(a, d, 0.28, 0.5, 'bandpass', 700, 3400),
+    // The grudge: two low notes that say "I remember".
+    grudge: (a, d) => {
+      tone(a, d, 'square', 196, 196, 0.13, 0.13);
+      tone(a, d, 'square', 147, 147, 0.26, 0.15, 0.12);
+    },
+    reveal: (a, d) => {
+      tone(a, d, 'triangle', 900, 420, 0.09, 0.2);
+      noise(a, d, 0.1, 0.22, 'bandpass', 2200, 800);
+    },
+    flip: (a, d) => {
+      tone(a, d, 'sine', 240, 1100, 0.2, 0.24);
+      tone(a, d, 'triangle', 480, 2000, 0.16, 0.08, 0.03);
+    },
+    reverse: (a, d) => {
+      tone(a, d, 'square', 620, 310, 0.11, 0.12);
+      tone(a, d, 'square', 310, 620, 0.11, 0.12, 0.11);
+    },
+    doorRun: (a, d) => {
+      tone(a, d, 'square', 500, 1300, 0.09, 0.1);
+      tone(a, d, 'square', 620, 1500, 0.09, 0.1, 0.1);
+      tone(a, d, 'square', 760, 1700, 0.09, 0.1, 0.2);
+    },
+    doorStop: (a, d) => tone(a, d, 'triangle', 240, 120, 0.1, 0.24),
+    locked: (a, d) => {
+      tone(a, d, 'square', 320, 280, 0.05, 0.13);
+      tone(a, d, 'square', 320, 280, 0.05, 0.13, 0.08);
+      noise(a, d, 0.05, 0.14, 'highpass', 3000, 2500, 0.08);
+    },
+    win: (a, d) => {
+      [523, 659, 784, 1047].forEach((f, i) => tone(a, d, 'square', f, f, 0.12, 0.12, i * 0.07));
+    },
+    ui: (a, d) => tone(a, d, 'triangle', 700, 900, 0.05, 0.16),
+    blip0: (a, d) => tone(a, d, 'square', 330, 310, 0.028, 0.035),
+    blip1: (a, d) => tone(a, d, 'square', 392, 370, 0.028, 0.035),
+    blip2: (a, d) => tone(a, d, 'square', 294, 280, 0.028, 0.035),
+  };
+
+  function play(name) {
+    if (!ctx || muted() || ctx.state !== 'running' || !SOUNDS[name]) return;
+    try {
+      SOUNDS[name](ctx, out);
+    } catch (e) {
+      // Sound must never break the game.
+    }
+  }
+
+  const DIE_EXTRA = { crush: 'crush', pit: 'pit', wall: 'crush' };
+  const TRIGGER = { crumble: 'crumble', spike: 'spikeOut', crusher: 'clunk', wall: 'rumble', bullet: 'whoosh' };
+
+  G.Audio = {
+    SOUNDS,
+    unlock,
+    play,
+    // Wakes a context the browser paused, once one exists. Never creates one: that needs a tap.
+    resume() {
+      if (ctx && ctx.state !== 'running') wake();
+    },
+    // Turns a simulation event into sound.
+    event(e, nowTick) {
+      switch (e.type) {
+        case 'jump': return play('jump');
+        case 'land':
+          // Little hops stay quiet, and a bouncing landing does not machine-gun.
+          if (e.force > 420 && nowTick - lastLand > 12) {
+            lastLand = nowTick;
+            play('land');
+          }
+          return undefined;
+        case 'bonk': return play('bonk');
+        case 'die':
+          play('die');
+          if (DIE_EXTRA[e.cause]) play(DIE_EXTRA[e.cause]);
+          return undefined;
+        case 'trigger':
+          if (TRIGGER[e.look]) play(TRIGGER[e.look]);
+          if (e.grudge) play('grudge');
+          return undefined;
+        case 'moverEnd':
+          if (e.look === 'crusher') play('thud');
+          return undefined;
+        case 'reveal': return play('reveal');
+        case 'flip': return play('flip');
+        case 'reverse': return play('reverse');
+        case 'doorRun': return play('doorRun');
+        case 'doorStop': return play('doorStop');
+        case 'doorLocked': return play('locked');
+        case 'win': return play('win');
+        default: return undefined;
+      }
+    },
+    // A quiet talking sound while the narrator's line types out.
+    blip() {
+      blipCount = (blipCount + 1) % 3;
+      play(`blip${blipCount}`);
+    },
+    get isMuted() { return G.Save.muted; },
+    toggleMute() {
+      G.Save.setMuted(!G.Save.muted);
+      applyVolume();
+      play('ui');
+    },
+    // Poki requires silence during ads.
+    setAdMuted(on) {
+      adMuted = on;
+      applyVolume();
+    },
+    setFocused(on) {
+      focused = on;
+      applyVolume();
+    },
+    // Re-reads every reason to be silent, e.g. after the site changes its sound setting.
+    refresh: () => applyVolume(),
+    button() {
+      const b = G.Lang.button();
+      return { x: b.x - 52, y: b.y, w: 44, h: b.h };
+    },
+  };
+})(globalThis);
+
+// Input layer. The game only ever reads left / right / jump, so touch buttons can plug in during week 2.
+(function (root) {
+  const G = root.Grudge;
+  const held = new Set();
+  const pressed = new Set();
+  const LEFT = ['ArrowLeft', 'KeyA'];
+  const RIGHT = ['ArrowRight', 'KeyD'];
+  let lastDir = 0; // with both directions held, the newest press wins
+  const virtual = { left: false, right: false, jump: false }; // on-screen touch buttons
+
+  const GAME_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space']);
+
+  function onKeyDown(e) {
+    if (GAME_KEYS.has(e.code)) e.preventDefault(); // stop the host page from scrolling (a Poki requirement)
+    if (!e.repeat) {
+      pressed.add(e.code);
+      if (LEFT.includes(e.code)) lastDir = -1;
+      if (RIGHT.includes(e.code)) lastDir = 1;
+    }
+    held.add(e.code);
+  }
+  function onKeyUp(e) {
+    held.delete(e.code);
+  }
+
+  G.Input = {
+    attach(target) {
+      root.addEventListener('keydown', onKeyDown);
+      root.addEventListener('keyup', onKeyUp);
+      // Keep the wheel from scrolling the page around the game.
+      root.addEventListener('wheel', (e) => e.preventDefault(), { passive: false });
+      target.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        target.focus();
+        pressed.add('Pointer');
+      });
+    },
+    setVirtual(name, on) {
+      if (on && !virtual[name]) {
+        if (name === 'left') lastDir = -1;
+        if (name === 'right') lastDir = 1;
+      }
+      virtual[name] = on;
+    },
+    state() {
+      const l = virtual.left || LEFT.some((c) => held.has(c));
+      const r = virtual.right || RIGHT.some((c) => held.has(c));
+      return {
+        left: l && (!r || lastDir < 0),
+        right: r && (!l || lastDir > 0),
+        jump: virtual.jump || held.has('Space') || held.has('ArrowUp') || held.has('KeyW'),
+      };
+    },
+    wasPressed(...codes) {
+      return codes.some((c) => pressed.has(c));
+    },
+    endTick() {
+      pressed.clear();
+    },
+    clear() {
+      held.clear();
+      virtual.left = virtual.right = virtual.jump = false;
+      pressed.clear();
+    },
+  };
+})(globalThis);
+
+// On-screen controls for phones and tablets. Multi-touch: move with one thumb, jump with the other.
+(function (root) {
+  const G = root.Grudge;
+  const C = G.CFG;
+  const active = new Map(); // pointerId -> control name
+  const TARGET_CSS = 112; // visible button size on the actual screen, in CSS pixels
+
+  function inRect(x, y, b) {
+    return x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+  }
+
+  function controls() {
+    const v = G.Render.bounds();
+    // Same physical size on any phone, but never so large that the buttons hide the level.
+    const size = Math.min(190, TARGET_CSS / G.Render.cssScale());
+    const y = v.B - size - 12;
+    return [
+      { name: 'left', x: v.L + 12, y, w: size, h: size },
+      { name: 'right', x: v.L + 12 + size + 10, y, w: size, h: size },
+      { name: 'jump', x: v.R - size - 12, y, w: size, h: size },
+    ];
+  }
+
+  function sync() {
+    const on = new Set(active.values());
+    for (const name of ['left', 'right', 'jump']) G.Input.setVirtual(name, on.has(name));
+  }
+
+  // The touch zones are much bigger than the drawings, so a thumb never has to aim:
+  // the left half of the screen moves and the right half jumps. The HUD strip stays clear.
+  function controlAt(x, y) {
+    if (y < 80 + G.Render.hudY()) return null;
+    const v = G.Render.bounds();
+    const [left, right, jump] = controls();
+    if (x >= (v.L + v.R) / 2) return jump;
+    return x < left.x + left.w + 5 ? left : right;
+  }
+
+  G.Touch = {
+    controls,
+    isDown: (name) => [...active.values()].includes(name),
+    TARGET_CSS,
+    pauseButton: () => ({ x: G.Render.bounds().L + 10, y: 38 + G.Render.hudY(), w: 70, h: 34 }),
+    restartButton: () => ({ x: C.W / 2 - 120, y: C.H / 2 + 134, w: 240, h: 44 }),
+    newGameButton: () => ({ x: C.W / 2 - 100, y: 484, w: 200, h: 40 }),
+    enable() {
+      if (G.Game.touch) return;
+      G.Game.touch = true;
+      G.Render.resize(); // makes room for the button strip
+    },
+    release() {
+      active.clear();
+      sync();
+    },
+    attach(canvas) {
+      const g = () => G.Game;
+      const media = root.matchMedia && root.matchMedia('(pointer: coarse)');
+      if (media && media.matches) G.Touch.enable();
+
+      canvas.addEventListener('pointerdown', (e) => {
+        if (e.pointerType === 'touch') G.Touch.enable();
+        if (!g().touch || g().ad) return;
+        const p = G.Render.toWorld(e.clientX, e.clientY);
+        const stop = () => {
+          e.stopImmediatePropagation();
+          e.preventDefault();
+        };
+        if (g().scene === 'title' && G.Save.level > 0 && inRect(p.x, p.y, G.Touch.newGameButton())) {
+          stop();
+          g().newGame();
+        } else if (g().scene === 'play' && g().paused && inRect(p.x, p.y, G.Touch.restartButton())) {
+          stop();
+          g().restartFromPause();
+        } else if (g().scene === 'play' && !g().paused) {
+          if (inRect(p.x, p.y, G.Touch.pauseButton())) {
+            stop();
+            g().pause();
+            return;
+          }
+          const hit = controlAt(p.x, p.y);
+          if (hit) {
+            stop();
+            active.set(e.pointerId, hit.name);
+            sync();
+          }
+        }
+      });
+      // Sliding a thumb from one arrow to the other changes direction without lifting it.
+      canvas.addEventListener('pointermove', (e) => {
+        if (!active.has(e.pointerId) || active.get(e.pointerId) === 'jump') return;
+        const p = G.Render.toWorld(e.clientX, e.clientY);
+        const hit = controlAt(p.x, p.y);
+        if (hit && hit.name !== 'jump') {
+          active.set(e.pointerId, hit.name);
+          sync();
+        }
+      });
+      const end = (e) => {
+        if (active.delete(e.pointerId)) sync();
+      };
+      root.addEventListener('pointerup', end);
+      root.addEventListener('pointercancel', end);
+      canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    },
+  };
+})(globalThis);
+
+// Juice: particles, screen shake, flash and player squash. Purely visual, never touches the simulation.
+(function (root) {
+  const G = root.Grudge;
+  const COL = G.COLORS;
+
+  const fx = {
+    particles: [],
+    trauma: 0,
+    flash: 0,
+    flashColor: '#fff',
+    sqX: 1,
+    sqY: 1,
+    sqVX: 0,
+    sqVY: 0,
+    hitstop: 0,
+    pulse: 0, // spawn pop-in
+  };
+
+  function burst(x, y, n, opt) {
+    for (let i = 0; i < n; i++) {
+      const ang = (opt.ang !== undefined ? opt.ang : 0) + (Math.random() - 0.5) * (opt.spread !== undefined ? opt.spread : Math.PI * 2);
+      const sp = opt.speed * (0.35 + Math.random() * 0.65);
+      const colors = opt.colors;
+      fx.particles.push({
+        x, y,
+        vx: Math.cos(ang) * sp,
+        vy: Math.sin(ang) * sp,
+        grav: opt.grav !== undefined ? opt.grav : 900,
+        life: opt.life * (0.6 + Math.random() * 0.4),
+        max: opt.life,
+        size: opt.size * (0.6 + Math.random() * 0.6),
+        color: colors[Math.floor(Math.random() * colors.length)],
+      });
+    }
+  }
+
+  function squash(x, y) {
+    fx.sqX = x;
+    fx.sqY = y;
+    fx.sqVX = 0;
+    fx.sqVY = 0;
+  }
+
+  fx.reset = function () {
+    fx.particles.length = 0;
+    fx.trauma = 0;
+    fx.flash = 0;
+    fx.hitstop = 0;
+    squash(1, 1);
+  };
+
+  fx.spawn = function (x, y) {
+    fx.pulse = 1;
+    burst(x, y, 10, { speed: 160, life: 0.3, size: 4, grav: 0, colors: [COL.bread, COL.crust] });
+    squash(0.6, 1.4);
+  };
+
+  fx.handle = function (e, theme) {
+    switch (e.type) {
+      case 'jump':
+        squash(0.72, 1.3);
+        burst(e.x, e.y, 6, { ang: e.g > 0 ? -Math.PI / 2 : Math.PI / 2, spread: 2.4, speed: 110, life: 0.25, size: 4, grav: 300, colors: [theme.under] });
+        break;
+      case 'land': {
+        const k = Math.min(1, e.force / 900);
+        squash(1 + 0.35 * k, 1 - 0.35 * k);
+        burst(e.x, e.y, 4 + Math.round(6 * k), { ang: e.g > 0 ? -Math.PI / 2 : Math.PI / 2, spread: 2.8, speed: 150 * k + 40, life: 0.25, size: 4, grav: 400, colors: [theme.under] });
+        break;
+      }
+      case 'bonk':
+        squash(1.2, 0.8);
+        fx.trauma = Math.max(fx.trauma, 0.2);
+        break;
+      case 'die':
+        fx.trauma = 0.75;
+        fx.flash = 0.35;
+        fx.flashColor = COL.hazard;
+        fx.hitstop = 8; // ticks at 120Hz
+        if (e.cause === 'crush') squash(1.5, 0.35);
+        else squash(1.12, 0.88);
+        // Crumbs fly out and the burnt slice smokes until it respawns.
+        burst(e.x, e.y, 34, { speed: 520, life: 0.6, size: 7, grav: 1100, colors: [COL.bread, COL.bread, COL.crust, COL.burnt] });
+        burst(e.x, e.y - 8, 10, { ang: -Math.PI / 2, spread: 0.8, speed: 110, life: 0.7, size: 7, grav: -40, colors: [COL.smoke] });
+        break;
+      case 'trigger':
+        if (e.look === 'crusher' || e.look === 'wall') fx.trauma = Math.max(fx.trauma, 0.25);
+        if (e.look === 'spike') fx.trauma = Math.max(fx.trauma, 0.2);
+        if (e.look === 'crumble') {
+          fx.trauma = Math.max(fx.trauma, 0.25);
+          burst(e.x, e.y - 40, 14, { ang: -Math.PI / 2, spread: 2.4, speed: 180, life: 0.4, size: 5, colors: [theme.under, theme.block] });
+        }
+        break;
+      case 'moverEnd':
+        if (e.look === 'crusher') {
+          fx.trauma = Math.max(fx.trauma, 0.5);
+          burst(e.x, e.y, 18, { ang: -Math.PI / 2, spread: 2.9, speed: 300, life: 0.4, size: 5, colors: [theme.under, theme.block] });
+        }
+        break;
+      case 'reveal':
+        fx.trauma = Math.max(fx.trauma, 0.25);
+        burst(e.x, e.y, 16, { speed: 200, life: 0.4, size: 5, colors: [theme.block, theme.under] });
+        break;
+      case 'flip':
+      case 'reverse':
+        fx.flash = 0.3;
+        fx.flashColor = COL.pad;
+        fx.trauma = Math.max(fx.trauma, 0.3);
+        burst(e.x, e.y, 18, { speed: 280, life: 0.45, size: 5, grav: 0, colors: [COL.pad, '#fff'] });
+        break;
+      case 'doorRun':
+        burst(e.x, e.y, 16, { speed: 260, life: 0.4, size: 5, grav: 200, colors: [COL.door, '#fff'] });
+        break;
+      case 'doorStop':
+        fx.trauma = Math.max(fx.trauma, 0.2);
+        burst(e.x, e.y, 10, { ang: -Math.PI / 2, spread: 2.6, speed: 160, life: 0.3, size: 4, grav: 400, colors: [COL.door] });
+        break;
+      case 'win':
+        fx.flash = 0.25;
+        fx.flashColor = COL.door;
+        burst(e.x, e.y, 30, { speed: 420, life: 0.6, size: 6, grav: 500, colors: [COL.door, COL.bread, '#fff'] });
+        break;
+    }
+  };
+
+  fx.update = function (dt) {
+    const list = fx.particles;
+    for (let i = list.length - 1; i >= 0; i--) {
+      const p = list[i];
+      p.life -= dt;
+      if (p.life <= 0) {
+        list[i] = list[list.length - 1];
+        list.pop();
+        continue;
+      }
+      p.vy += p.grav * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+    }
+    fx.trauma = Math.max(0, fx.trauma - dt * 1.9);
+    fx.flash = Math.max(0, fx.flash - dt * 2.2);
+    fx.pulse = Math.max(0, fx.pulse - dt * 4);
+
+    // Springs back to a 1:1 square.
+    const k = 420, d = 22;
+    fx.sqVX += (k * (1 - fx.sqX) - d * fx.sqVX) * dt;
+    fx.sqVY += (k * (1 - fx.sqY) - d * fx.sqVY) * dt;
+    fx.sqX += fx.sqVX * dt;
+    fx.sqY += fx.sqVY * dt;
+  };
+
+  fx.shakeOffset = function () {
+    const s = fx.trauma * fx.trauma * 16;
+    return { x: (Math.random() - 0.5) * 2 * s, y: (Math.random() - 0.5) * 2 * s };
+  };
+
+  G.Fx = fx;
+})(globalThis);
+
+// All drawing. Every shape is made in code; there are no image files.
+(function (root) {
+  const G = root.Grudge;
+  const C = G.CFG;
+  const COL = G.COLORS;
+  const FONT = 'system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans", "Yu Gothic", "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans CJK SC", sans-serif';
+  const lerp = (a, b, t) => a + (b - a) * t;
+
+  let ctx, canvas, scale = 1, offX = 0, offY = 0, deck = 0;
+  const FLOOR_BAND = 120; // height of the floor below the usual standing level, in world units
+  let canvasTextLimit = C.W - 60;
+
+  // Works out zoom and position for what is on screen right now. While playing on a touch screen
+  // the sky above the level's viewRow is cropped, and a strip for the buttons is added only if
+  // the floor is too thin to hold them at this zoom.
+  function layout() {
+    const g = G.Game;
+    const cw = canvas.width, ch = canvas.height;
+    const crop = g && g.touch && g.scene === 'play' && !g.paused && !g.langOpen && g.sim;
+    const dprNow = cw / (canvas.clientWidth || 1);
+    deck = 0;
+    let topY = 0;
+    if (crop) {
+      topY = C.TOP + (G.LEVELS[g.sim.index].viewRow || 0) * C.T;
+      for (let i = 0; i < 3; i++) {
+        const s = Math.min(cw / C.W, ch / (C.H + deck - topY));
+        deck = Math.max(0, G.Touch.TARGET_CSS / (s / dprNow) + 24 - FLOOR_BAND);
+      }
+    }
+    scale = Math.min(cw / C.W, ch / (C.H + deck - topY));
+    offX = (cw - C.W * scale) / 2;
+    offY = crop ? ch - (C.H + deck) * scale : (ch - C.H * scale) / 2;
+  }
+
+  function resize() {
+    const dpr = Math.min(root.devicePixelRatio || 1, 2);
+    const vw = root.innerWidth, vh = root.innerHeight;
+    // The canvas covers the whole window. The 16:9 world is centred and its colours run on to the edges.
+    canvas.style.width = vw + 'px';
+    canvas.style.height = vh + 'px';
+    canvas.width = Math.round(vw * dpr);
+    canvas.height = Math.round(vh * dpr);
+    layout();
+  }
+
+  // Largest size up to `size` at which the text fits. Translations vary a lot in length.
+  function fitSize(str, size, weight, maxW) {
+    ctx.font = `${weight || 700} ${size}px ${FONT}`;
+    const w = ctx.measureText(str).width;
+    return w > maxW ? Math.max(9, Math.floor((size * maxW) / w)) : size;
+  }
+
+  function text(str, x, y, size, color, align, weight, maxW) {
+    const fitted = fitSize(str, size, weight, maxW || canvasTextLimit);
+    ctx.font = `${weight || 700} ${fitted}px ${FONT}`;
+    ctx.textAlign = align || 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = color;
+    ctx.fillText(str, x, y);
+  }
+
+  // Visible area in world units; wider or taller than the world on non-16:9 screens.
+  function bounds() {
+    return {
+      L: -offX / scale,
+      T: -offY / scale,
+      R: (canvas.width - offX) / scale,
+      B: (canvas.height - offY) / scale,
+    };
+  }
+
+  function hudY() {
+    return Math.max(0, bounds().T);
+  }
+
+  // Poki puts its own button (the "pill", up to 64x92 CSS px, 24px from the top) in the top centre
+  // on phones and tablets. Centred HUD text goes below it there. Returns a y in HUD space.
+  function topCentre(y) {
+    if (!G.Game || !G.Game.touch || !G.Poki.hasPill) return y;
+    const below = bounds().T + (24 + 64 + 6) / (scale * canvas.clientWidth / canvas.width) - hudY();
+    return Math.max(y, below);
+  }
+
+  function fillAll(color) {
+    const v = bounds();
+    ctx.fillStyle = color;
+    ctx.fillRect(v.L - 40, v.T - 40, v.R - v.L + 80, v.B - v.T + 80);
+  }
+
+  function themeFor(index) {
+    return COL.themes[index % COL.themes.length];
+  }
+
+  function drawBackdrop(theme) {
+    fillAll(theme.bg);
+    ctx.fillStyle = 'rgba(255,255,255,0.035)';
+    for (let r = 0; r < C.ROWS + 1; r++) {
+      for (let c = 0; c < C.COLS + 1; c++) ctx.fillRect(c * C.T - 1, r * C.T - 1, 2, 2);
+    }
+  }
+
+  function drawTiles(lv, theme, holes) {
+    const T = C.T;
+    const solidAt = (r, c) => lv.solid[r][c] && !holes[`${c},${r}`];
+    ctx.fillStyle = theme.block;
+    for (let r = 0; r < C.ROWS; r++) {
+      for (let c = 0; c < C.COLS; c++) {
+        if (!solidAt(r, c)) continue;
+        // Half a pixel of overlap hides seams at fractional scales; row 0 also fills the band above the world.
+        const v = bounds();
+        const top = r === 0 ? v.T - C.TOP - 40 : r * T;
+        // World units here are shifted down by TOP, so this reaches the true bottom of the world.
+        const bottom = r === C.ROWS - 1 ? (deck ? C.H - C.TOP : v.B + 40) : r * T + T + 0.5;
+        const left = c === 0 ? v.L - 40 : c * T;
+        const right = c === C.COLS - 1 ? v.R + 40 : c * T + T + 0.5;
+        ctx.fillRect(left, top, right - left, bottom - top);
+      }
+    }
+    // A shaded underside on bottom edges gives shape while staying flat.
+    ctx.fillStyle = theme.under;
+    for (let r = 0; r < C.ROWS - 1; r++) {
+      for (let c = 0; c < C.COLS; c++) {
+        if (solidAt(r, c) && !solidAt(r + 1, c)) ctx.fillRect(c * T, (r + 1) * T - 6, T, 6);
+      }
+    }
+  }
+
+  function spikeRow(x, y, w, h, dir, color) {
+    // One triangle per tile along the base.
+    ctx.fillStyle = color;
+    const n = Math.max(1, Math.round((dir === 'up' || dir === 'down' ? w : h) / C.T));
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      if (dir === 'up') {
+        const a = x + (i * w) / n, b = a + w / n;
+        ctx.moveTo(a + 2, y + h); ctx.lineTo((a + b) / 2, y); ctx.lineTo(b - 2, y + h);
+      } else if (dir === 'down') {
+        const a = x + (i * w) / n, b = a + w / n;
+        ctx.moveTo(a + 2, y); ctx.lineTo((a + b) / 2, y + h); ctx.lineTo(b - 2, y);
+      } else if (dir === 'right') {
+        const a = y + (i * h) / n, b = a + h / n;
+        ctx.moveTo(x, a + 2); ctx.lineTo(x + w, (a + b) / 2); ctx.lineTo(x, b - 2);
+      } else {
+        const a = y + (i * h) / n, b = a + h / n;
+        ctx.moveTo(x + w, a + 2); ctx.lineTo(x, (a + b) / 2); ctx.lineTo(x + w, b - 2);
+      }
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawStaticSpikes(lv) {
+    for (const sp of lv.spikes) spikeRow(sp.x, sp.y, C.T, C.T, sp.dir, COL.hazard);
+  }
+
+  function drawDoor(a, ax, ay, chomp, locked) {
+    const moving = a.state === 'run';
+    ctx.fillStyle = locked ? '#7d7a88' : COL.door;
+    ctx.fillRect(ax, ay, a.w, a.h);
+    ctx.fillStyle = locked ? '#45424f' : COL.doorDark;
+    ctx.fillRect(ax + 6, ay + 6, a.w - 12, a.h - 6);
+    if (locked) {
+      // Padlock.
+      const mx = ax + a.w / 2, my = ay + a.h / 2;
+      ctx.strokeStyle = COL.hazard;
+      ctx.lineWidth = 3;
+      ctx.strokeRect(mx - 5, my - 11, 10, 10);
+      ctx.fillStyle = COL.hazard;
+      ctx.fillRect(mx - 9, my - 3, 18, 14);
+      return;
+    }
+    ctx.fillStyle = COL.door;
+    ctx.fillRect(ax + a.w - 13, ay + a.h / 2, 4, 4);
+    if (moving) {
+      // Panicked little eyes while it runs.
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(ax + 9, ay + 14, 7, 7);
+      ctx.fillRect(ax + 20, ay + 14, 7, 7);
+    }
+    if (chomp) {
+      spikeRow(ax + 2, ay + 8, a.w - 4, 18, 'down', COL.hazard);
+      spikeRow(ax + 2, ay + a.h - 20, a.w - 4, 18, 'up', COL.hazard);
+    }
+  }
+
+  function drawActor(a, s, alpha, theme) {
+    const x = lerp(a.px, a.x, alpha), y = lerp(a.py, a.y, alpha);
+    const T = C.T;
+    switch (a.type) {
+      case 'crumble': {
+        if (a.state === 'gone') return;
+        const wob = a.state === 'wait' ? Math.sin(s.tick * 1.1) * 2 : 0;
+        const lift = a.state === 'idle' && a.y === 0 ? C.TOP : 0;
+        ctx.fillStyle = theme.block;
+        ctx.fillRect(x + wob - 0.5, y - lift - 0.5, a.w + 1, a.h + lift + 1);
+        if (a.state !== 'idle' || a.y + a.h < C.ROWS * C.T) {
+          ctx.fillStyle = theme.under;
+          ctx.fillRect(x + wob, y + a.h - 6, a.w, 6);
+        }
+        break;
+      }
+      case 'ghost':
+        if (!a.revealed) {
+          ctx.fillStyle = theme.block;
+          ctx.fillRect(x, y, a.w, a.h);
+          ctx.fillStyle = theme.under;
+          ctx.fillRect(x, y + a.h - 6, a.w, 6);
+        } else {
+          ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+          ctx.setLineDash([6, 6]);
+          ctx.lineWidth = 2;
+          ctx.strokeRect(x + 1, y + 1, a.w - 2, a.h - 2);
+          ctx.setLineDash([]);
+        }
+        break;
+      case 'hidden':
+        if (a.revealed) {
+          ctx.fillStyle = theme.block;
+          ctx.fillRect(x, y, a.w, a.h);
+          ctx.fillStyle = theme.under;
+          ctx.fillRect(x, y + a.h - 6, a.w, 6);
+        }
+        break;
+      case 'spike':
+        if (a.prog > 0) {
+          const h = T * a.prog;
+          if (a.dir === 'up') spikeRow(a.x, a.y + T - h, a.w, h, 'up', COL.hazard);
+          else spikeRow(a.x, a.y, a.w, h, 'down', COL.hazard);
+        }
+        break;
+      case 'mover':
+        drawMover(a, x, y, s, theme);
+        break;
+      case 'pad':
+        drawPad(a, s);
+        break;
+      case 'door': {
+        const chomp = a.fake && s.status === 'dead' && s.killer === a.id;
+        drawDoor(a, x, y, chomp, a.id === 'door' && s.locked);
+        break;
+      }
+    }
+  }
+
+  function drawMover(a, x, y, s, theme) {
+    if (a.state === 'gone') return;
+    switch (a.look) {
+      case 'crusher': {
+        const wob = a.state === 'wait' ? Math.sin(s.tick * 1.2) * 2 : 0;
+        ctx.fillStyle = theme.block;
+        ctx.fillRect(x + wob, y, a.w, a.h);
+        ctx.fillStyle = theme.under;
+        ctx.fillRect(x + wob, y + a.h - 6, a.w, 6);
+        if (a.state === 'wait' || a.state === 'move') {
+          ctx.fillStyle = COL.hazard;
+          ctx.fillRect(x + wob, y + a.h - 8, a.w, 8);
+        }
+        break;
+      }
+      case 'wall':
+        ctx.fillStyle = COL.hazard;
+        ctx.fillRect(x - 1000, y - C.TOP, a.w + 1000 - 24, a.h + C.TOP);
+        spikeRow(x + a.w - 24, y - C.TOP, 24, a.h + C.TOP, 'right', COL.hazard);
+        break;
+      case 'bullet':
+        if (a.state !== 'move') return;
+        ctx.fillStyle = COL.hazard;
+        ctx.beginPath();
+        ctx.moveTo(x, y + a.h / 2);
+        ctx.lineTo(x + 18, y);
+        ctx.lineTo(x + a.w, y);
+        ctx.lineTo(x + a.w, y + a.h);
+        ctx.lineTo(x + 18, y + a.h);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = 'rgba(255,45,85,0.35)';
+        ctx.fillRect(x + a.w + 6, y + 4, 30, a.h - 8);
+        break;
+      case 'platform':
+        ctx.fillStyle = COL.platform;
+        ctx.fillRect(x, y, a.w, a.h);
+        ctx.fillStyle = 'rgba(0,0,0,0.2)';
+        ctx.fillRect(x, y + a.h - 6, a.w, 6);
+        break;
+    }
+  }
+
+  function drawPad(a, s) {
+    const T = C.T;
+    if (a.kind === 'reverse') {
+      const phase = (s.tick % 60) / 60;
+      ctx.fillStyle = COL.pad;
+      for (let y = 0; y < a.h; y += 20) {
+        const on = ((y / 20 + Math.floor(phase * 2)) % 2) === 0;
+        if (on) ctx.fillRect(a.x + T / 2 - 3, y, 6, 12);
+      }
+      chevrons(a.x + T / 2, a.y + a.h - 70);
+      return;
+    }
+    ctx.fillStyle = COL.pad;
+    const floor = a.side === 'floor';
+    const barY = floor ? a.y + T - 8 : a.y;
+    ctx.fillRect(a.x + 2, barY, T - 4, 8);
+    // An arrow shows which way it throws you.
+    const bob = Math.sin(s.tick * 0.06) * 3;
+    const mid = a.x + T / 2;
+    const tipY = floor ? a.y + 2 + bob : a.y + T - 2 + bob;
+    const baseY = floor ? a.y + 22 + bob : a.y + 18 + bob;
+    ctx.beginPath();
+    ctx.moveTo(mid, tipY);
+    ctx.lineTo(mid - 10, baseY);
+    ctx.lineTo(mid + 10, baseY);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function chevrons(cx, cy) {
+    ctx.fillStyle = COL.pad;
+    ctx.beginPath();
+    ctx.moveTo(cx - 18, cy); ctx.lineTo(cx - 6, cy - 9); ctx.lineTo(cx - 6, cy + 9); ctx.closePath();
+    ctx.moveTo(cx + 18, cy); ctx.lineTo(cx + 6, cy - 9); ctx.lineTo(cx + 6, cy + 9); ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawDeathMarks(marks) {
+    // Every past life stays behind as a small burnt slice.
+    ctx.globalAlpha = 0.85;
+    for (const m of marks) {
+      const x = Math.max(9, Math.min(C.W - 9, m.x));
+      const y = Math.max(9, Math.min(C.ROWS * C.T - 9, m.y));
+      ctx.save();
+      ctx.translate(x, y + 9);
+      drawToast(18, 18, COL.burntCrust, COL.burnt);
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // A slice of toast standing on (0, 0): crust outline, soft bread inside, puffed-out head.
+  function toastPath(w, h, inset) {
+    const hw = w / 2 - inset;
+    const body = hw * 0.8;
+    const top = -h + inset;
+    const neck = -h * 0.62;
+    const base = -inset;
+    ctx.beginPath();
+    ctx.moveTo(-body, base);
+    ctx.lineTo(-body, neck);
+    ctx.quadraticCurveTo(-hw, neck, -hw, neck - (neck - top) * 0.45);
+    ctx.quadraticCurveTo(-hw, top, 0, top);
+    ctx.quadraticCurveTo(hw, top, hw, neck - (neck - top) * 0.45);
+    ctx.quadraticCurveTo(hw, neck, body, neck);
+    ctx.lineTo(body, base);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawToast(w, h, crust, bread) {
+    ctx.fillStyle = crust;
+    toastPath(w, h, 0);
+    ctx.fillStyle = bread;
+    toastPath(w, h, 3);
+  }
+
+  function drawPlayer(p, alpha, fx, tick) {
+    const x = lerp(p.px, p.x, alpha), y = lerp(p.py, p.y, alpha);
+    const w = C.PW * fx.sqX, h = C.PH * fx.sqY;
+    const flip = p.g < 0;
+    ctx.save();
+    ctx.translate(x + C.PW / 2, flip ? y : y + C.PH);
+    if (flip) ctx.scale(1, -1);
+    const pop = 1 + fx.pulse * 0.25;
+    ctx.scale(pop, pop);
+    drawToast(w, h, COL.crust, COL.bread);
+
+    // Eyes look where it is going and widen when falling.
+    const falling = p.vy * p.g > 200;
+    const look = p.face * (1 + Math.min(1.5, Math.abs(p.vx) / 180));
+    const blink = tick % 340 < 12 && p.grounded;
+    const eyeW = falling ? 5 : 4;
+    const eyeH = blink ? 1.5 : falling ? 7 : 6;
+    const ey = -h * 0.74 - eyeH / 2 + (p.vy * p.g < -100 ? -1 : 0);
+    ctx.fillStyle = COL.playerEye;
+    ctx.fillRect(look - 5 - eyeW / 2, ey, eyeW, eyeH);
+    ctx.fillRect(look + 5 - eyeW / 2, ey, eyeW, eyeH);
+    // Small mouth; a worried o while falling.
+    ctx.fillRect(look - (falling ? 2 : 3), -h * 0.36, falling ? 4 : 6, falling ? 4 : 2);
+    ctx.restore();
+  }
+
+  function drawBurnt(p, fx) {
+    const w = C.PW * fx.sqX, h = C.PH * fx.sqY;
+    ctx.save();
+    ctx.translate(p.x + C.PW / 2, p.g < 0 ? p.y : p.y + C.PH);
+    if (p.g < 0) ctx.scale(1, -1);
+    drawToast(w, h, COL.burntCrust, COL.burnt);
+    ctx.strokeStyle = COL.player;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    const ey = -h * 0.72;
+    for (const ex of [-5, 5]) {
+      ctx.moveTo(ex - 3, ey - 3); ctx.lineTo(ex + 3, ey + 3);
+      ctx.moveTo(ex + 3, ey - 3); ctx.lineTo(ex - 3, ey + 3);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawParticles(fx) {
+    for (const p of fx.particles) {
+      const k = p.life / p.max;
+      const size = p.size * Math.min(1, k * 1.6);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x - size / 2, p.y - size / 2, size, size);
+    }
+  }
+
+  function pill(x, y, w, h) {
+    ctx.fillStyle = 'rgba(14,12,23,0.82)';
+    ctx.fillRect(x, y, w, h);
+  }
+
+  function drawHud(g) {
+    const s = g.sim;
+    const def = G.LEVELS[s.index];
+    const label = `${G.t('levelLabel', { n: s.index + 1 })} · ${G.t('lv_' + def.id)}`;
+    const labelSize = fitSize(label, 15, 700, 330);
+    ctx.font = `700 ${labelSize}px ${FONT}`;
+    const lw = ctx.measureText(label).width + 22;
+    // Anchored to the screen edges, so on wide phones it stays out of the level.
+    const edge = bounds();
+    pill(edge.L + 10, 8, lw, 26);
+    text(label, edge.L + 21, 21.5, labelSize, '#fff');
+
+    const d = `${G.t('deaths')} ${G.Save.totalDeaths}`;
+    ctx.font = `700 15px ${FONT}`;
+    const dw = ctx.measureText(d).width + 22;
+    pill(edge.R - 10 - dw, 8, dw, 26);
+    text(d, edge.R - 21, 21.5, 15, COL.hazard, 'right');
+
+    if (s.player.reverse) {
+      const r = G.t('reversed');
+      ctx.font = `700 15px ${FONT}`;
+      const rw = ctx.measureText(r).width + 22;
+      const ry = topCentre(8);
+      pill(C.W / 2 - rw / 2, ry, rw, 26);
+      text(r, C.W / 2, ry + 13.5, 15, COL.pad, 'center');
+    }
+  }
+
+  // The narrator: a typed-out line under the HUD. It never covers the middle of the play area.
+  function drawLine(g) {
+    if (!g.line) return;
+    const shown = g.line.text.slice(0, Math.ceil(g.line.t * 45));
+    let size = 20;
+    ctx.font = `700 ${size}px ${FONT}`;
+    const full = ctx.measureText(g.line.text).width;
+    // Stays clear of the share button on the right.
+    if (full > C.W - 200) size = Math.floor((size * (C.W - 200)) / full);
+    ctx.font = `700 ${size}px ${FONT}`;
+    const w = ctx.measureText(g.line.text).width + 28;
+    const y = topCentre(42) + (g.sim && g.sim.player.reverse ? topCentre(8) - 8 : 0);
+    pill(C.W / 2 - w / 2, y, w, size + 18);
+    const x = C.W / 2 - (w - 28) / 2;
+    text(shown, x, y + (size + 18) / 2, size, COL.player);
+  }
+
+  function drawWorld(g, alpha) {
+    const s = g.sim;
+    const lv = G.Sim.compile(s.index);
+    const theme = themeFor(s.index);
+    const fx = G.Fx;
+    const shake = fx.shakeOffset();
+
+    ctx.save();
+    ctx.translate(shake.x, shake.y);
+    drawBackdrop(theme);
+    ctx.save();
+    ctx.translate(0, C.TOP);
+
+    if (g.introT > 0) {
+      const f = Math.min(1, g.introT / 0.4);
+      ctx.globalAlpha = f * 0.16;
+      const introV = bounds();
+      text(String(s.index + 1).padStart(2, '0'), C.W / 2, (introV.T + introV.B) / 2 - C.TOP - 60, 160, '#fff', 'center', 800);
+      ctx.globalAlpha = 1;
+    }
+
+    drawDeathMarks(g.marks);
+
+    // Actors first so the fixed tiles hide anything that slides out from behind them.
+    for (const a of s.actors) if (a.type === 'pad' || a.type === 'door') drawActor(a, s, alpha, theme);
+    for (const a of s.actors) if (a.type !== 'pad' && a.type !== 'door') drawActor(a, s, alpha, theme);
+    drawTiles(lv, theme, s.holes);
+    drawStaticSpikes(lv);
+
+    if (s.index === 0) {
+      if (g.touch) {
+        // Sits in the free space between the move and jump buttons.
+        const [, right, jump] = G.Touch.controls();
+        const gapL = right.x + right.w + 10, gapR = jump.x - 10;
+        text(G.t('controlsTouch'), (gapL + gapR) / 2, 11.5 * C.T, 18, theme.bg, 'center', 700, gapR - gapL);
+      } else {
+        text(G.t('controls'), C.W / 2, 11.5 * C.T, 18, theme.bg, 'center');
+      }
+    } else if (s.index === 3) {
+      text(G.t('jumpHint'), 3 * C.T, 11.5 * C.T, 13, theme.bg, 'center', 700, 225);
+    }
+
+    if (s.status === 'play') drawPlayer(s.player, alpha, fx, s.tick);
+    else if (s.status === 'dead') drawBurnt(s.player, fx);
+    drawParticles(fx);
+    ctx.restore();
+
+    if (deck) {
+      const v = bounds();
+      ctx.fillStyle = theme.under;
+      ctx.fillRect(v.L - 40, C.H, v.R - v.L + 80, v.B - C.H + 40);
+    }
+    // HUD and buttons stay at the top of whatever part of the level is showing.
+    ctx.save();
+    ctx.translate(0, hudY());
+    drawHud(g);
+    drawLine(g);
+    ctx.restore();
+    if (G.Share.inPlay()) {
+      const sb = G.Share.button();
+      pill(sb.x, sb.y, sb.w, sb.h);
+      text(G.t('shareShort'), sb.x + sb.w / 2, sb.y + sb.h / 2 + 0.5, 15, COL.door, 'center', 700, sb.w - 8);
+    }
+    if (g.touch && !g.paused) drawTouchControls();
+    ctx.restore();
+
+    if (fx.flash > 0) {
+      ctx.globalAlpha = fx.flash;
+      fillAll(fx.flashColor);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function drawTitle(g) {
+    const theme = COL.themes[0];
+    drawBackdrop(theme);
+    const groundY = 400;
+    const view = bounds();
+    ctx.fillStyle = theme.block;
+    ctx.fillRect(view.L, groundY, view.R - view.L, view.B - groundY);
+    ctx.fillStyle = theme.under;
+    ctx.fillRect(view.L, groundY, view.R - view.L, 6);
+
+    text(G.t('title'), C.W / 2, 150, G.LANG === 'zh' ? 88 : 80, '#fff', 'center', 800);
+    text(G.t('tagline'), C.W / 2, 220, 22, COL.hazard, 'center');
+
+    // The block hops, and lands on the X marks of its previous lives.
+    const t = g.clock;
+    const period = 1.1;
+    const phase = (t % period) / period;
+    const hop = 4 * phase * (1 - phase);
+    const px = C.W / 2 - 14, py = groundY - 28 - hop * 80;
+    const sq = phase < 0.08 || phase > 0.94 ? 1.18 : 0.94;
+    // Drawn larger here so the character reads on the title screen.
+    ctx.save();
+    ctx.translate(px + 14, py + 28);
+    ctx.scale(1.6, 1.6);
+    drawToast(28 * sq, 28 / sq, COL.crust, COL.bread);
+    ctx.fillStyle = COL.playerEye;
+    ctx.fillRect(-7, -22 / sq, 4, 6);
+    ctx.fillRect(3, -22 / sq, 4, 6);
+    ctx.fillRect(-3, -10 / sq, 6, 2);
+    ctx.restore();
+    drawDeathMarks([{ x: C.W / 2 - 150, y: groundY - 9 }, { x: C.W / 2 + 120, y: groundY - 9 }, { x: C.W / 2 + 180, y: groundY - 9 }]);
+    spikeRow(C.W / 2 + 230, groundY - 40, 80, 40, 'up', COL.hazard);
+    spikeRow(C.W / 2 - 300, groundY - 40, 40, 40, 'up', COL.hazard);
+
+    const blink = Math.floor(t * 1.6) % 2 === 0;
+    const returning = G.Save.level > 0;
+    const prompt = g.touch ? G.t(returning ? 'contTouch' : 'startTouch') : G.t(returning ? 'cont' : 'start');
+    text(prompt, C.W / 2, 462, 22, blink ? theme.bg : 'rgba(25,22,39,0.55)', 'center');
+    if (g.touch) {
+      if (returning) drawMenuButton(G.Touch.newGameButton(), G.t('newGame'));
+    } else {
+      text(G.t('tapStart'), C.W / 2, 494, 15, 'rgba(25,22,39,0.55)', 'center', 500);
+    }
+  }
+
+  function drawShareButton() {
+    const b = G.Share.button();
+    ctx.fillStyle = COL.door;
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+    const label = G.Game.touch ? G.t('share').replace(/\s*[（(]S[）)]/, '') : G.t('share');
+    text(label, b.x + b.w / 2, b.y + b.h / 2 + 1, 19, '#0b3b2c', 'center', 700, b.w - 16);
+  }
+
+  function drawNotice(g) {
+    if (!g.notice) return;
+    ctx.font = `700 18px ${FONT}`;
+    const w = ctx.measureText(g.notice.text).width + 28;
+    ctx.fillStyle = COL.door;
+    const y = topCentre(16 - hudY()) + hudY(); // drawn in world space, not HUD space
+    ctx.fillRect(C.W / 2 - w / 2, y, w, 36);
+    text(g.notice.text, C.W / 2, y + 19, 18, '#0b3b2c', 'center');
+  }
+
+  // The image people send to friends. Drawn at 1200x630, the usual link-preview shape.
+  function paintCard(target, W, H, st) {
+    const saved = ctx;
+    const savedLimit = canvasTextLimit;
+    ctx = target;
+    canvasTextLimit = W - 80;
+    const theme = COL.themes[0];
+    const groundY = H - 120;
+    ctx.fillStyle = theme.bg;
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = theme.block;
+    ctx.fillRect(0, groundY, W, H - groundY);
+
+    text(G.t('title'), 64, 72, 44, '#fff', 'left', 800);
+    text(String(st.total), 64, 210, 150, COL.hazard, 'left', 800);
+    ctx.font = `800 150px ${FONT}`;
+    const numW = ctx.measureText(String(st.total)).width;
+    text(G.t('cardBurnt'), 64 + numW + 22, 244, 38, '#fff', 'left', 700, W - 340 - numW);
+
+    const progress = st.finished ? G.t('cardCleared') : G.t('cardReached', { n: st.reached });
+    const worst = st.worst ? `  ·  ${G.t('cardWorst', { n: st.worst })}` : '';
+    text(progress + worst, 64, 340, 30, COL.bread, 'left', 700, W - 330);
+
+    // One burnt slice per death, up to what fits on the ground.
+    const slices = Math.min(st.total, 26);
+    for (let i = 0; i < slices; i++) {
+      ctx.save();
+      ctx.translate(70 + i * 30, groundY);
+      drawToast(30, 30, COL.burntCrust, COL.burnt);
+      ctx.restore();
+    }
+
+    // The survivor, big, looking at the mess it made.
+    ctx.save();
+    ctx.translate(W - 170, groundY);
+    ctx.scale(6, 6);
+    drawToast(28, 28, COL.crust, COL.bread);
+    ctx.fillStyle = COL.playerEye;
+    ctx.fillRect(-9, -21, 4, 6);
+    ctx.fillRect(1, -21, 4, 6);
+    ctx.fillRect(-6, -10, 6, 2);
+    ctx.restore();
+
+    text(G.t('cardDare'), W / 2, groundY + 62, 40, theme.bg, 'center', 800, W - 120);
+    ctx = saved;
+    canvasTextLimit = savedLimit;
+  }
+
+  function drawLangButton() {
+    const b = G.Lang.button();
+    ctx.fillStyle = 'rgba(14,12,23,0.82)';
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+    text(`▾ ${G.Lang.currentName()}`, b.x + b.w / 2, b.y + b.h / 2 + 1, 16, '#fff', 'center', 700, b.w - 12);
+  }
+
+  function drawMuteButton() {
+    const b = G.Audio.button();
+    ctx.fillStyle = 'rgba(14,12,23,0.82)';
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+    const cx = b.x + b.w / 2 - 3, cy = b.y + b.h / 2;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.moveTo(cx - 9, cy - 4); ctx.lineTo(cx - 4, cy - 4); ctx.lineTo(cx + 3, cy - 10);
+    ctx.lineTo(cx + 3, cy + 10); ctx.lineTo(cx - 4, cy + 4); ctx.lineTo(cx - 9, cy + 4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.lineWidth = 2;
+    if (G.Audio.isMuted) {
+      ctx.strokeStyle = COL.hazard;
+      ctx.beginPath();
+      ctx.moveTo(cx + 6, cy - 5); ctx.lineTo(cx + 15, cy + 5);
+      ctx.moveTo(cx + 15, cy - 5); ctx.lineTo(cx + 6, cy + 5);
+      ctx.stroke();
+    } else {
+      ctx.strokeStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(cx + 5, cy, 7, -0.8, 0.8);
+      ctx.stroke();
+    }
+  }
+
+  function drawLangPicker() {
+    fillAll('rgba(14,12,23,0.92)');
+    for (const cell of G.Lang.cells()) {
+      const active = cell.code === G.LANG;
+      ctx.fillStyle = active ? COL.door : 'rgba(255,255,255,0.1)';
+      ctx.fillRect(cell.x, cell.y, cell.w, cell.h);
+      text(cell.name, cell.x + cell.w / 2, cell.y + cell.h / 2 + 1, 21, active ? '#0b3b2c' : '#fff', 'center', 700, cell.w - 16);
+    }
+  }
+
+  function drawEnd() {
+    const theme = COL.themes[0];
+    drawBackdrop(theme);
+    text(G.t('endTitle'), C.W / 2, 170, 58, '#fff', 'center', 800);
+    text(G.t('endStat'), C.W / 2, 262, 22, 'rgba(255,255,255,0.7)', 'center');
+    text(String(G.Save.totalDeaths), C.W / 2, 320, 72, COL.hazard, 'center', 800);
+    drawShareButton();
+    text(G.t(G.Game.touch ? 'endPromptTouch' : 'endPrompt'), C.W / 2, 462, 20, COL.player, 'center');
+  }
+
+  function drawMenuButton(b, label) {
+    ctx.fillStyle = '#191627';
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+    text(label, b.x + b.w / 2, b.y + b.h / 2 + 1, 17, '#fff', 'center', 700, b.w - 16);
+  }
+
+  function arrow(cx, cy, dir, color, k) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    if (dir === 'up') {
+      ctx.moveTo(cx, cy - 22 * k); ctx.lineTo(cx - 24 * k, cy + 16 * k); ctx.lineTo(cx + 24 * k, cy + 16 * k);
+    } else {
+      const d = dir === 'left' ? -1 : 1;
+      ctx.moveTo(cx + d * 22 * k, cy); ctx.lineTo(cx - d * 16 * k, cy - 24 * k); ctx.lineTo(cx - d * 16 * k, cy + 24 * k);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawTouchControls() {
+    for (const b of G.Touch.controls()) {
+      const down = G.Touch.isDown(b.name);
+      // Ghosted so the level stays readable: never a panel, only a faint arrow that works on
+      // both the dark background and the light floor. A press only brightens the arrow.
+      arrow(b.x + b.w / 2, b.y + b.h / 2, b.name === 'jump' ? 'up' : b.name, down ? 'rgba(255,201,51,0.6)' : 'rgba(255,255,255,0.22)', b.w / 108);
+      ctx.strokeStyle = down ? 'rgba(14,12,23,0.35)' : 'rgba(14,12,23,0.2)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    const p = G.Touch.pauseButton();
+    pill(p.x, p.y, p.w, p.h);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(p.x + p.w / 2 - 8, p.y + 9, 5, 16);
+    ctx.fillRect(p.x + p.w / 2 + 3, p.y + 9, 5, 16);
+  }
+
+  function drawRotate() {
+    fillAll('#0e0c17');
+    text(G.t('rotate'), C.W / 2, C.H / 2, 46, '#fff', 'center', 800, C.W - 80);
+  }
+
+  function drawPause() {
+    fillAll('rgba(14,12,23,0.78)');
+    text(G.t('paused'), C.W / 2, C.H / 2 - 24, 54, '#fff', 'center', 800);
+    text(G.t(G.Game.touch ? 'resumeTouch' : 'resume'), C.W / 2, C.H / 2 + 34, 20, 'rgba(255,255,255,0.75)', 'center');
+    drawShareButton();
+    if (G.Game.touch) drawMenuButton(G.Touch.restartButton(), G.t('restart'));
+  }
+
+  function drawWipe(g) {
+    if (!g.wipe) return;
+    const p = g.wipe.t / g.wipe.dur;
+    // Slides in from the left, fully covers at the halfway point, then leaves to the right.
+    const v = bounds();
+    const span = v.R - v.L;
+    ctx.fillStyle = COL.player;
+    ctx.fillRect(lerp(v.L - span, v.R, p), v.T, span, v.B - v.T);
+  }
+
+  G.Render = {
+    init(c) {
+      canvas = c;
+      ctx = c.getContext('2d');
+      resize();
+      root.addEventListener('resize', resize);
+    },
+    frame(g, alpha) {
+      layout();
+      ctx.setTransform(scale, 0, 0, scale, offX, offY);
+      if (g.scene === 'title') drawTitle(g);
+      else if (g.scene === 'end') drawEnd();
+      else drawWorld(g, alpha);
+      if (g.paused) drawPause();
+      if (G.Lang.available()) {
+        drawLangButton();
+        drawMuteButton();
+      }
+      if (g.langOpen) drawLangPicker();
+      if (g.touch && root.innerHeight > root.innerWidth) drawRotate();
+      drawNotice(g);
+      drawWipe(g);
+    },
+    paintCard,
+    bounds,
+    hudY,
+    resize,
+    // CSS pixels per world unit: how large things really appear on this screen.
+    cssScale: () => (scale * canvas.clientWidth) / canvas.width,
+    // Window position to world units.
+    toWorld(clientX, clientY) {
+      const dpr = canvas.width / (canvas.clientWidth || 1);
+      return { x: (clientX * dpr - offX) / scale, y: (clientY * dpr - offY) / scale };
+    },
+  };
+})(globalThis);
+
+// Game flow: title, levels, death and respawn, level clear, end screen, pause.
+(function (root) {
+  const G = root.Grudge;
+  const C = G.CFG;
+  const Input = G.Input;
+  const Fx = G.Fx;
+
+  const g = {
+    scene: 'title',
+    sim: null,
+    paused: false,
+    clock: 0,
+    acc: 0,
+    introT: 0,
+    respawnT: 0,
+    wipe: null,
+    marks: [],
+    line: null, // what the narrator is saying
+    notice: null, // short confirmation message, e.g. after sharing
+    langOpen: false, // language picker showing
+    ad: false, // a commercial break is running: no input, no simulation, no SDK events
+    ready: false, // Poki SDK finished starting
+    touch: false, // show on-screen controls
+    script: null, // test hook: a list of inputs replayed instead of the keyboard
+  };
+
+  function say(text) {
+    g.line = { text, t: 0, life: 2.2 + text.length * 0.06 };
+  }
+
+  function currentId() {
+    return G.LEVELS[g.sim.index].id;
+  }
+
+  function loadMarks() {
+    g.marks = G.Save.deathsFor(currentId()).map((d) => ({ x: d.x, y: d.y }));
+  }
+
+  function startLevel(i, showIntro) {
+    g.sim = G.Sim.create(i, G.Save.memoryFor(G.LEVELS[i].id));
+    g.scene = 'play';
+    g.respawnT = 0;
+    loadMarks();
+    if (showIntro) {
+      g.introT = 1.3;
+      const opening = G.Grudge.openingLine(G.LEVELS[i], G.Save.memoryFor(G.LEVELS[i].id));
+      if (opening) say(opening);
+    }
+    const p = g.sim.player;
+    Fx.reset();
+    Fx.spawn(p.x + C.PW / 2, p.y + C.PH / 2);
+  }
+
+  function wipeTo(cb) {
+    if (g.wipe) return;
+    g.wipe = { t: 0, dur: 0.5, cb, done: false };
+  }
+
+  function goToLevel(i) {
+    wipeTo(() => {
+      if (i >= G.LEVELS.length) {
+        G.Save.setLevel(0);
+        g.sim = null;
+        g.line = null;
+        g.scene = 'end';
+      } else {
+        G.Save.setLevel(i);
+        startLevel(i, true);
+        if (!g.paused) G.Poki.start();
+      }
+    });
+  }
+
+  // Runs a commercial break, then continues. Input and SDK events stay off until it ends.
+  // `when` is 'level' or 'resume'; each site allows breaks at different moments (see poki.js).
+  function runBreak(done, when) {
+    g.ad = true;
+    Input.clear();
+    G.Touch.release();
+    G.Poki.commercialBreak(() => {
+      G.Audio.setAdMuted(true);
+    }, when).then(() => {
+      G.Audio.setAdMuted(false);
+      g.ad = false;
+      done();
+    });
+  }
+
+  function resume() {
+    g.paused = false;
+    if (g.scene === 'play') runBreak(() => G.Poki.start(), 'resume');
+  }
+
+  function tickPlay(dt) {
+    const s = g.sim;
+    g.introT = Math.max(0, g.introT - dt);
+
+    if (C.DEV) {
+      if (Input.wasPressed('BracketRight')) return goToLevel(s.index + 1);
+      if (Input.wasPressed('BracketLeft') && s.index > 0) return goToLevel(s.index - 1);
+    }
+
+    if (Fx.hitstop > 0) {
+      Fx.hitstop--;
+      return;
+    }
+
+    if (s.status === 'play') {
+      if (Input.wasPressed('KeyR')) {
+        startLevel(s.index, false);
+        return;
+      }
+      const input = g.script ? g.script.shift() || {} : Input.state();
+      G.Sim.step(s, input);
+      const theme = G.COLORS.themes[s.index % G.COLORS.themes.length];
+      for (const e of s.events) {
+        Fx.handle(e, theme);
+        G.Audio.event(e, s.tick);
+        if (e.type === 'trigger' && e.grudge) say(G.Grudge.rememberLine());
+        if (e.type === 'doorLocked') say(G.Grudge.lockedLine());
+      }
+      if (s.status === 'dead') {
+        G.Save.recordDeath(currentId(), s.player.x + C.PW / 2, s.player.y + C.PH / 2, s.cause);
+        say(G.Grudge.onDeath(G.LEVELS[s.index], s));
+        g.marks.push({ x: s.player.x + C.PW / 2, y: s.player.y + C.PH / 2 });
+        if (g.marks.length > 30) g.marks.shift();
+        g.respawnT = C.respawnDelay;
+      } else if (s.status === 'won') {
+        G.Poki.stop();
+        const next = s.index + 1;
+        if (next < G.LEVELS.length) runBreak(() => goToLevel(next), 'level');
+        else goToLevel(next);
+      }
+    } else if (s.status === 'dead') {
+      g.respawnT -= dt;
+      if (g.respawnT <= 0) startLevel(s.index, false);
+    }
+  }
+
+  function tick(dt) {
+    if (g.ad) {
+      Input.endTick();
+      return;
+    }
+    g.clock += dt;
+    // Phones play sideways: hold everything until the device is turned.
+    if (g.touch && root.innerHeight > root.innerWidth) {
+      g.pause();
+      Input.endTick();
+      return;
+    }
+    if (g.notice && (g.notice.t -= dt) <= 0) g.notice = null;
+    if (g.line && !g.paused) {
+      // Same typing speed as the renderer; a blip every few characters gives the narrator a voice.
+      const before = Math.ceil(g.line.t * 45);
+      g.line.t += dt;
+      const shown = Math.ceil(g.line.t * 45);
+      if (shown !== before && shown <= g.line.text.length && shown % 3 === 0) G.Audio.blip();
+      if (g.line.t > g.line.life) g.line = null;
+    }
+
+    if (g.wipe) {
+      g.wipe.t += dt;
+      if (!g.wipe.done && g.wipe.t >= g.wipe.dur / 2) {
+        g.wipe.done = true;
+        g.wipe.cb();
+      }
+      if (g.wipe.t >= g.wipe.dur) g.wipe = null;
+    }
+
+    if (g.langOpen) {
+      if (Input.wasPressed('Escape')) g.langOpen = false;
+      Input.endTick();
+      return;
+    }
+
+    if (g.paused) {
+      if (Input.wasPressed('Escape', 'KeyP', 'Space', 'Pointer')) resume();
+      Input.endTick();
+      return;
+    }
+
+    switch (g.scene) {
+      case 'title':
+        if (!g.ready) break;
+        if (Input.wasPressed('KeyN') && G.Save.level > 0) {
+          g.newGame();
+        } else if (Input.wasPressed('Space', 'Enter', 'Pointer', 'ArrowUp', 'KeyW')) {
+          goToLevel(Math.min(G.Save.level, G.LEVELS.length - 1));
+        }
+        break;
+      case 'play':
+        // P as well as ESC: on CrazyGames ESC also leaves full screen.
+        if (Input.wasPressed('Escape', 'KeyP')) {
+          g.pause();
+          break;
+        }
+        tickPlay(dt);
+        break;
+      case 'end':
+        if (Input.wasPressed('Space', 'Enter', 'Pointer')) {
+          G.Save.reset();
+          goToLevel(0);
+        }
+        break;
+    }
+    Fx.update(dt);
+    Input.endTick();
+  }
+
+  // Runs the fixed 60Hz simulation for the elapsed real time. Clamped so a stall cannot cause a jump.
+  g.frame = function (realDt) {
+    g.acc += Math.min(realDt, 0.1);
+    while (g.acc >= C.STEP) {
+      tick(C.STEP);
+      g.acc -= C.STEP;
+    }
+    G.Render.frame(g, g.paused || !g.sim ? 1 : g.acc / C.STEP);
+  };
+
+  g.tick = tick;
+  // `focusLost`: called because the player switched tab or window, not from the pause button.
+  g.pause = function (focusLost) {
+    if (g.scene === 'play' && !g.paused && !g.ad) {
+      g.paused = true;
+      G.Poki.stop(focusLost);
+    }
+    Input.clear();
+    G.Touch.release();
+  };
+  g.newGame = function () {
+    G.Save.reset();
+    goToLevel(0);
+  };
+  g.restartFromPause = function () {
+    startLevel(g.sim.index, false);
+    resume();
+  };
+
+  G.Game = g;
+})(globalThis);
+
+// Share: a score card image plus a line of text, sent through the system share sheet.
+// Falls back to the clipboard, then to saving the image, because support differs a lot between browsers.
+// Everything up to navigator.share() runs synchronously so the browser still counts it as a user action.
+(function (root) {
+  const G = root.Grudge;
+  const C = G.CFG;
+  const CARD_W = 1200, CARD_H = 630;
+
+  function stats() {
+    const levels = G.LEVELS.map((def, i) => ({ i, deaths: G.Save.memoryFor(def.id).deaths }));
+    const worst = levels.reduce((best, l) => (l.deaths > best.deaths ? l : best), { i: -1, deaths: 0 });
+    const finished = G.Game.scene === 'end';
+    const reached = finished ? G.LEVELS.length : (G.Game.sim ? G.Game.sim.index + 1 : 1);
+    return { total: G.Save.totalDeaths, worst: worst.deaths > 0 ? worst.i + 1 : 0, finished, reached };
+  }
+
+  function shareText(st) {
+    const g = G.t('title');
+    const parts = [st.finished ? G.t('shareDone', { g, n: st.total }) : G.t('shareAt', { g, r: st.reached, n: st.total })];
+    if (st.worst) parts.push(G.t('shareWorst', { w: st.worst }));
+    parts.push(G.t('cardDare'));
+    const line = parts.join(G.Lang.sentenceGap());
+    const url = G.Poki.shareUrl || C.SHARE_URL;
+    return url ? `${line} ${url}` : line;
+  }
+
+  function cardBlob(st) {
+    const canvas = root.document.createElement('canvas');
+    canvas.width = CARD_W;
+    canvas.height = CARD_H;
+    G.Render.paintCard(canvas.getContext('2d'), CARD_W, CARD_H, st);
+    const bytes = root.atob(canvas.toDataURL('image/png').split(',')[1]);
+    const arr = new Uint8Array(bytes.length);
+    for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+    return new Blob([arr], { type: 'image/png' });
+  }
+
+  function saveImage(blob) {
+    const a = root.document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'burnt-again.png';
+    a.click();
+    root.setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+
+  function notify(key) {
+    G.Game.notice = { text: G.t(key), t: 2.8 };
+  }
+
+  G.Share = {
+    stats,
+    shareText,
+    cardBlob,
+    available() {
+      return G.Game.scene === 'end' || (G.Game.scene === 'play' && G.Game.paused);
+    },
+    inPlay() {
+      return G.Game.scene === 'play' && !G.Game.paused;
+    },
+    // Logical-screen rectangle of the button on the current screen.
+    button() {
+      if (this.inPlay()) return { x: G.Render.bounds().R - 80, y: 38 + G.Render.hudY(), w: 70, h: G.Game.touch ? 34 : 26 }; // small one under the death counter
+      const y = G.Game.scene === 'end' ? 372 : C.H / 2 + 76;
+      return { x: C.W / 2 - 120, y, w: 240, h: 48 };
+    },
+    async trigger() {
+      const st = stats();
+      const text = shareText(st);
+      const blob = cardBlob(st);
+      const nav = root.navigator;
+      const file = new File([blob], 'burnt-again.png', { type: 'image/png' });
+      if (nav.canShare && nav.canShare({ files: [file] })) {
+        try {
+          await nav.share({ files: [file], text, title: G.t('title') });
+          return 'shared';
+        } catch (e) {
+          if (e && e.name === 'AbortError') return 'cancelled'; // the player closed the share sheet
+        }
+      }
+      try {
+        await nav.clipboard.write([new root.ClipboardItem({
+          'image/png': blob,
+          'text/plain': new Blob([text], { type: 'text/plain' }),
+        })]);
+        notify('shareCopied');
+        return 'copied';
+      } catch (e) {
+        // Clipboard images are blocked here; save the picture and try to copy the text.
+      }
+      saveImage(blob);
+      try {
+        await nav.clipboard.writeText(text);
+      } catch (e) {
+        // The saved image still carries the score.
+      }
+      notify('shareSaved');
+      return 'saved';
+    },
+  };
+})(globalThis);
+
+// Playtest panel (T key): change the feel live, then send the numbers back as feedback. Dev builds only.
+(function (root) {
+  const G = root.Grudge;
+  const C = G.CFG;
+  const zh = G.LANG === 'zh';
+  const SLIDERS = [
+    ['runSpeed', zh ? '跑动速度' : 'Run speed', 200, 420, 5],
+    ['groundAccel', zh ? '起步加速' : 'Ground accel', 1000, 6000, 100],
+    ['groundFric', zh ? '停下刹车' : 'Ground stop', 1000, 8000, 100],
+    ['airAccel', zh ? '空中控制' : 'Air control', 600, 4000, 100],
+    ['jumpVel', zh ? '跳跃力度' : 'Jump power', 600, 950, 5],
+    ['gravity', zh ? '重力' : 'Gravity', 1400, 3400, 50],
+    ['fallMult', zh ? '下落加重' : 'Fall weight', 1, 2, 0.05],
+    ['jumpCut', zh ? '松键收跳' : 'Jump cut', 0.2, 1, 0.05],
+    ['coyote', zh ? '离台宽容(秒)' : 'Coyote (s)', 0, 0.2, 0.01],
+    ['buffer', zh ? '提前按跳(秒)' : 'Jump buffer (s)', 0, 0.25, 0.01],
+    ['respawnDelay', zh ? '复活等待(秒)' : 'Respawn (s)', 0.1, 1, 0.02],
+  ];
+
+  G.Tuning = {
+    attach() {
+      if (!C.DEV) return;
+      const panel = root.document.getElementById('tune');
+      const defaults = {};
+      const rows = [];
+      panel.innerHTML = `<b>${zh ? '手感调节（T 关闭）' : 'Feel tuning (T to close)'}</b><div>${zh ? '[ 和 ] 键切换关卡' : '[ and ] change level'}</div>`;
+      for (const [key, label, min, max, step] of SLIDERS) {
+        defaults[key] = C[key];
+        const row = root.document.createElement('div');
+        row.innerHTML = `<label><span>${label}</span><span class="v"></span></label><input type="range" min="${min}" max="${max}" step="${step}">`;
+        const input = row.querySelector('input');
+        const value = row.querySelector('.v');
+        const sync = () => {
+          input.value = C[key];
+          value.textContent = C[key];
+        };
+        input.addEventListener('input', () => {
+          C[key] = Number(input.value);
+          value.textContent = C[key];
+        });
+        sync();
+        rows.push(sync);
+        panel.appendChild(row);
+      }
+      const reset = root.document.createElement('button');
+      reset.textContent = zh ? '恢复默认' : 'Reset';
+      reset.addEventListener('click', () => {
+        Object.assign(C, defaults);
+        rows.forEach((sync) => sync());
+      });
+      panel.appendChild(reset);
+
+      root.addEventListener('keydown', (e) => {
+        if (e.code === 'KeyT' && !e.repeat) {
+          panel.style.display = panel.style.display === 'block' ? 'none' : 'block';
+          root.document.activeElement && root.document.activeElement.blur();
+        }
+      });
+    },
+  };
+})(globalThis);
+
+// Entry point.
+(function (root) {
+  const G = root.Grudge;
+  const canvas = root.document.getElementById('game');
+
+  G.Lang.init();
+  const toWorld = (e) => G.Render.toWorld(e.clientX, e.clientY);
+  G.Render.init(canvas);
+  const inRect = (x, y, b) => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+  // Language button and picker. Runs first so a click here does not also start or resume the game.
+  canvas.addEventListener('pointerdown', (e) => {
+    const { x, y } = toWorld(e);
+    const g = G.Game;
+    G.Audio.unlock();
+    if (g.ad) return;
+    if (!g.langOpen && G.Lang.available() && inRect(x, y, G.Audio.button())) {
+      G.Audio.toggleMute();
+      e.stopImmediatePropagation();
+      e.preventDefault();
+    } else if (g.langOpen) {
+      const cell = G.Lang.cells().find((c) => inRect(x, y, c));
+      if (cell) G.Lang.set(cell.code);
+      g.langOpen = false;
+      G.Audio.play('ui');
+      e.stopImmediatePropagation();
+      e.preventDefault();
+    } else if (G.Lang.available() && inRect(x, y, G.Lang.button())) {
+      g.langOpen = true;
+      G.Audio.play('ui');
+      e.stopImmediatePropagation();
+      e.preventDefault();
+    }
+  });
+  // Registered before the input layer so a click on the share button does not also resume or restart.
+  canvas.addEventListener('pointerdown', (e) => {
+    if (G.Game.ad || (!G.Share.available() && !G.Share.inPlay())) return;
+    const { x, y } = toWorld(e);
+    const b = G.Share.button();
+    if (inRect(x, y, b)) {
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      // Stop the action first, so nothing kills the player behind the share sheet.
+      if (G.Share.inPlay()) G.Game.pause();
+      G.Share.trigger();
+    }
+  });
+  root.addEventListener('keydown', (e) => {
+    G.Audio.unlock();
+    if (e.code === 'KeyS' && !e.repeat && G.Share.available()) G.Share.trigger();
+    if (e.code === 'KeyL' && !e.repeat && G.Lang.available()) G.Lang.next();
+    if (e.code === 'KeyM' && !e.repeat && !G.Game.ad) G.Audio.toggleMute();
+  });
+  // iOS Safari counts the end of a tap, not its start, as permission to play sound.
+  for (const type of ['pointerup', 'touchend']) root.addEventListener(type, () => G.Audio.unlock(), { passive: true });
+  G.Touch.attach(canvas);
+  G.Input.attach(canvas);
+  G.Tuning.attach();
+  canvas.focus();
+
+  // Stop when the player leaves, so nobody dies while the tab is in the background.
+  root.addEventListener('blur', () => {
+    G.Audio.setFocused(false);
+    G.Game.pause(true);
+  });
+  root.addEventListener('focus', () => {
+    G.Audio.setFocused(true);
+    G.Audio.resume();
+  });
+  root.document.addEventListener('visibilitychange', () => {
+    G.Audio.setFocused(!root.document.hidden);
+    if (root.document.hidden) G.Game.pause(true);
+  });
+
+  // Never hold the game back for long if the SDK is slow or blocked.
+  Promise.race([G.Poki.init(), new Promise((r) => root.setTimeout(r, 2500))]).then(() => {
+    G.Game.ready = true;
+  });
+
+  let last = root.performance.now();
+  function loop(now) {
+    const dt = (now - last) / 1000;
+    last = now;
+    G.Game.frame(dt);
+    root.requestAnimationFrame(loop);
+  }
+  root.requestAnimationFrame(loop);
+})(globalThis);
+
+</script>
