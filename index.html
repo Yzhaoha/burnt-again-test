@@ -266,10 +266,23 @@ body { background: #0e0c17; }
     return s;
   }
 
+  // Starts on localStorage. On CrazyGames the SDK's Data module (same API, saved to the player's
+  // account) takes over once the SDK is ready; see useStore.
+  let store = null;
+  try {
+    store = root.localStorage;
+  } catch (e) {
+    store = null;
+  }
+
+  function readFrom(st) {
+    const text = st && st.getItem(KEY);
+    return text ? sanitize(JSON.parse(text)) : null;
+  }
+
   function load() {
     try {
-      const text = root.localStorage.getItem(KEY);
-      return text ? sanitize(JSON.parse(text)) : fresh();
+      return readFrom(store) || fresh();
     } catch (e) {
       return fresh();
     }
@@ -279,13 +292,27 @@ body { background: #0e0c17; }
 
   function persist() {
     try {
-      root.localStorage.setItem(KEY, JSON.stringify(data));
+      if (store) store.setItem(KEY, JSON.stringify(data));
     } catch (e) {
       // Keep playing on the in-memory copy.
     }
   }
 
   G.Save = {
+    // Switches to another storage with the localStorage API. Saved progress there wins; if it is
+    // empty, the progress made so far in this browser is copied over, so nobody loses levels.
+    useStore(next) {
+      let remote;
+      try {
+        remote = readFrom(next);
+      } catch (e) {
+        return false;
+      }
+      store = next;
+      if (remote) data = remote;
+      else persist();
+      return true;
+    },
     get level() { return data.level; },
     get totalDeaths() { return data.totalDeaths; },
     get lang() { return data.lang; },
@@ -1170,6 +1197,12 @@ body { background: #0e0c17; }
     if (safe(() => s.environment) === 'disabled') return;
     cg = s;
     safe(() => s.game.loadingStart());
+    // Progress saved to the player's CrazyGames account (the submission uses the Data module).
+    // A language saved there counts as the player's own choice.
+    if (safe(() => s.data) && G.Save.useStore(s.data)) {
+      if (G.Lang.CODES.includes(G.Save.lang)) G.Lang.init();
+      G.Audio.refresh();
+    }
     const info = safe(() => s.user.systemInfo) || {};
     useLang(String(info.locale || '').slice(0, 2).toLowerCase());
     // CrazyGames asks for its device type instead of guessing phones from touch support.
@@ -1181,7 +1214,12 @@ body { background: #0e0c17; }
     };
     apply(safe(() => s.game.settings));
     safe(() => s.game.addSettingsChangeListener(apply));
+    // The share button links to this game on CrazyGames.
+    const url = String(safe(() => s.game.inviteLink({ from: 'share' })) || '');
+    shareUrl = /^https?:\/\/(localhost|127\.|\[::1\])/.test(url) ? '' : url;
     safe(() => s.game.loadingStop());
+    // A slow start may have let the player into a level already.
+    if (playing) cgSync();
   }
 
   G.Poki = {
@@ -1214,6 +1252,10 @@ body { background: #0e0c17; }
       if (poki()) safe(() => poki().gameplayStop());
       else if (cg && !cgTimer) cgSync();
     },
+    // Once, when the whole game is beaten (CrazyGames asks for this to be rare). Poki has no equivalent.
+    happytime() {
+      if (cg) safe(() => cg.game.happytime());
+    },
     // Resolves when play can continue; the site decides whether an ad actually shows.
     // `when` is 'level' (between levels) or 'resume' (closing the pause screen). Poki wants
     // breaks on resume; CrazyGames allows them only at level changes.
@@ -1228,11 +1270,29 @@ body { background: #0e0c17; }
       }
       if (cg && when === 'level') {
         return new Promise((resolve) => {
-          const done = () => resolve();
-          try {
-            cg.ad.requestAd('midgame', { adStarted: onAdStart, adFinished: done, adError: done });
-          } catch (e) {
+          let started = false;
+          let finished = false;
+          const done = () => {
+            if (finished) return;
+            finished = true;
             resolve();
+          };
+          // Never leave the player stuck if the ad never starts.
+          root.setTimeout(() => {
+            if (!started) done();
+          }, 6000);
+          try {
+            const p = cg.ad.requestAd('midgame', {
+              adStarted: () => {
+                started = true;
+                safe(() => onAdStart && onAdStart());
+              },
+              adFinished: done,
+              adError: done,
+            });
+            if (p && typeof p.catch === 'function') p.catch(done);
+          } catch (e) {
+            done();
           }
         });
       }
@@ -2804,6 +2864,7 @@ body { background: #0e0c17; }
         g.sim = null;
         g.line = null;
         g.scene = 'end';
+        G.Poki.happytime();
       } else {
         G.Save.setLevel(i);
         startLevel(i, true);
