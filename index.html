@@ -1826,6 +1826,72 @@ body { background: #0e0c17; }
   const lerp = (a, b, t) => a + (b - a) * t;
 
   let ctx, canvas, scale = 1, offX = 0, offY = 0, deck = 0;
+
+  // Pixel art: the world is drawn into a small buffer, P world units per art pixel (a 40-unit
+  // tile is 16 pixels), then scaled up without smoothing. Text and buttons are drawn afterwards
+  // at full resolution so every language stays readable.
+  const P = 2.5;
+  const sn = (v) => Math.round(v / P) * P; // snaps a world position to the art-pixel grid
+  let mainCtx = null, pix = null, pctx = null, pox = 0, poy = 0, pw = 0, ph = 0;
+
+  function beginPixels() {
+    const v = bounds();
+    pox = Math.floor(v.L / P) * P;
+    poy = Math.floor(v.T / P) * P;
+    pw = Math.ceil((v.R - pox) / P) + 1;
+    ph = Math.ceil((v.B - poy) / P) + 1;
+    if (!pix) {
+      pix = root.document.createElement('canvas');
+      pctx = pix.getContext('2d');
+    }
+    if (pix.width < pw || pix.height < ph) {
+      pix.width = Math.max(pix.width, pw);
+      pix.height = Math.max(pix.height, ph);
+    }
+    pctx.setTransform(1, 0, 0, 1, 0, 0);
+    pctx.clearRect(0, 0, pw, ph);
+    pctx.setTransform(1 / P, 0, 0, 1 / P, -pox / P, -poy / P);
+    pctx.imageSmoothingEnabled = false;
+    mainCtx = ctx;
+    ctx = pctx;
+  }
+
+  function endPixels() {
+    ctx = mainCtx;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(pix, 0, 0, pw, ph, pox, poy, pw * P, ph * P);
+    ctx.imageSmoothingEnabled = true;
+  }
+
+  // A filled box with its corner pixels cut off: the pixel-art version of a panel.
+  function box(x, y, w, h, color) {
+    ctx.fillStyle = color;
+    ctx.fillRect(x + P, y, w - 2 * P, P);
+    ctx.fillRect(x, y + P, w, h - 2 * P);
+    ctx.fillRect(x + P, y + h - P, w - 2 * P, P);
+  }
+
+  // Stepped triangle in art pixels: the tip at (tx, ty), the base `half` units either side,
+  // `len` units long, pointing up, down, left or right. A darker right/lower half gives it volume.
+  function pixTri(tx, ty, half, len, dir, color, shade) {
+    const rows = Math.max(1, Math.round(len / P));
+    for (let i = 0; i < rows; i++) {
+      const wHalf = Math.max(P / 2, sn(((i + 1) / rows) * half));
+      const d = i * P;
+      ctx.fillStyle = color;
+      if (dir === 'up') ctx.fillRect(tx - wHalf, ty + d, wHalf * 2, P);
+      else if (dir === 'down') ctx.fillRect(tx - wHalf, ty - d - P, wHalf * 2, P);
+      else if (dir === 'left') ctx.fillRect(tx + d, ty - wHalf, P, wHalf * 2);
+      else ctx.fillRect(tx - d - P, ty - wHalf, P, wHalf * 2);
+      if (shade && wHalf > P) {
+        ctx.fillStyle = shade;
+        if (dir === 'up') ctx.fillRect(tx, ty + d, wHalf, P);
+        else if (dir === 'down') ctx.fillRect(tx, ty - d - P, wHalf, P);
+        else if (dir === 'left') ctx.fillRect(tx + d, ty, P, wHalf);
+        else ctx.fillRect(tx - d - P, ty, P, wHalf);
+      }
+    }
+  }
   const FLOOR_BAND = 120; // height of the floor below the usual standing level, in world units
   let canvasTextLimit = C.W - 60;
 
@@ -1912,60 +1978,68 @@ body { background: #0e0c17; }
 
   function drawBackdrop(theme) {
     fillAll(theme.bg);
-    ctx.fillStyle = 'rgba(255,255,255,0.035)';
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
     for (let r = 0; r < C.ROWS + 1; r++) {
-      for (let c = 0; c < C.COLS + 1; c++) ctx.fillRect(c * C.T - 1, r * C.T - 1, 2, 2);
+      for (let c = 0; c < C.COLS + 1; c++) ctx.fillRect(c * C.T, r * C.T, P, P);
     }
   }
 
+  // Same pattern every time for the same tile, so the texture never flickers.
+  const speck = (c, r, k) => (((c * 73856093) ^ (r * 19349663) ^ (k * 83492791)) >>> 0) % 14;
+
   function drawTiles(lv, theme, holes) {
     const T = C.T;
-    const solidAt = (r, c) => lv.solid[r][c] && !holes[`${c},${r}`];
+    const solidAt = (r, c) => r >= 0 && r < C.ROWS && c >= 0 && c < C.COLS && lv.solid[r][c] && !holes[`${c},${r}`];
+    const v = bounds();
     ctx.fillStyle = theme.block;
     for (let r = 0; r < C.ROWS; r++) {
       for (let c = 0; c < C.COLS; c++) {
         if (!solidAt(r, c)) continue;
-        // Half a pixel of overlap hides seams at fractional scales; row 0 also fills the band above the world.
-        const v = bounds();
+        // Row 0 also fills the band above the world, the edge columns and bottom row run off screen.
         const top = r === 0 ? v.T - C.TOP - 40 : r * T;
         // World units here are shifted down by TOP, so this reaches the true bottom of the world.
-        const bottom = r === C.ROWS - 1 ? (deck ? C.H - C.TOP : v.B + 40) : r * T + T + 0.5;
+        const bottom = r === C.ROWS - 1 ? (deck ? C.H - C.TOP : v.B + 40) : r * T + T;
         const left = c === 0 ? v.L - 40 : c * T;
-        const right = c === C.COLS - 1 ? v.R + 40 : c * T + T + 0.5;
+        const right = c === C.COLS - 1 ? v.R + 40 : c * T + T;
         ctx.fillRect(left, top, right - left, bottom - top);
       }
     }
-    // A shaded underside on bottom edges gives shape while staying flat.
-    ctx.fillStyle = theme.under;
-    for (let r = 0; r < C.ROWS - 1; r++) {
+    for (let r = 0; r < C.ROWS; r++) {
       for (let c = 0; c < C.COLS; c++) {
-        if (solidAt(r, c) && !solidAt(r + 1, c)) ctx.fillRect(c * T, (r + 1) * T - 6, T, 6);
+        if (!solidAt(r, c)) continue;
+        const x = c * T, y = r * T;
+        // A light lip on exposed tops, a shaded underside, and a few specks of texture.
+        if (!solidAt(r - 1, c) && r > 0) {
+          ctx.fillStyle = 'rgba(255,255,255,0.55)';
+          ctx.fillRect(x, y, T, P);
+        }
+        ctx.fillStyle = theme.under;
+        if (!solidAt(r + 1, c) && r < C.ROWS - 1) ctx.fillRect(x, y + T - 2 * P, T, 2 * P);
+        for (let k = 0; k < 3; k++) {
+          const sx = speck(c, r, k), sy = speck(r, c, k + 7);
+          ctx.fillRect(x + P + sx * P, y + 2 * P + (sy % 12) * P, P, P);
+        }
       }
     }
   }
 
   function spikeRow(x, y, w, h, dir, color) {
-    // One triangle per tile along the base.
-    ctx.fillStyle = color;
+    // One stepped spike per tile along the base, with a darker shaded half.
     const n = Math.max(1, Math.round((dir === 'up' || dir === 'down' ? w : h) / C.T));
-    ctx.beginPath();
+    const shade = color === COL.hazard ? '#c41e44' : null;
     for (let i = 0; i < n; i++) {
-      if (dir === 'up') {
-        const a = x + (i * w) / n, b = a + w / n;
-        ctx.moveTo(a + 2, y + h); ctx.lineTo((a + b) / 2, y); ctx.lineTo(b - 2, y + h);
-      } else if (dir === 'down') {
-        const a = x + (i * w) / n, b = a + w / n;
-        ctx.moveTo(a + 2, y); ctx.lineTo((a + b) / 2, y + h); ctx.lineTo(b - 2, y);
-      } else if (dir === 'right') {
-        const a = y + (i * h) / n, b = a + h / n;
-        ctx.moveTo(x, a + 2); ctx.lineTo(x + w, (a + b) / 2); ctx.lineTo(x, b - 2);
+      if (dir === 'up' || dir === 'down') {
+        const a = x + (i * w) / n, b = a + w / n, mid = sn((a + b) / 2);
+        const half = (b - a) / 2 - P;
+        if (dir === 'up') pixTri(mid, sn(y), half, h, 'up', color, shade);
+        else pixTri(mid, sn(y + h), half, h, 'down', color, shade);
       } else {
-        const a = y + (i * h) / n, b = a + h / n;
-        ctx.moveTo(x + w, a + 2); ctx.lineTo(x, (a + b) / 2); ctx.lineTo(x + w, b - 2);
+        const a = y + (i * h) / n, b = a + h / n, mid = sn((a + b) / 2);
+        const half = (b - a) / 2 - P;
+        if (dir === 'right') pixTri(sn(x + w), mid, half, w, 'right', color, shade);
+        else pixTri(sn(x), mid, half, w, 'left', color, shade);
       }
     }
-    ctx.closePath();
-    ctx.fill();
   }
 
   function drawStaticSpikes(lv) {
@@ -1973,33 +2047,53 @@ body { background: #0e0c17; }
   }
 
   function drawDoor(a, ax, ay, chomp, locked) {
+    ax = sn(ax);
+    ay = sn(ay);
     const moving = a.state === 'run';
     ctx.fillStyle = locked ? '#7d7a88' : COL.door;
     ctx.fillRect(ax, ay, a.w, a.h);
     ctx.fillStyle = locked ? '#45424f' : COL.doorDark;
-    ctx.fillRect(ax + 6, ay + 6, a.w - 12, a.h - 6);
+    ctx.fillRect(ax + 2 * P, ay + 2 * P, a.w - 4 * P, a.h - 2 * P);
+    // A light frame edge on the left, like a lit doorway.
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.fillRect(ax, ay, P, a.h);
     if (locked) {
-      // Padlock.
-      const mx = ax + a.w / 2, my = ay + a.h / 2;
-      ctx.strokeStyle = COL.hazard;
-      ctx.lineWidth = 3;
-      ctx.strokeRect(mx - 5, my - 11, 10, 10);
+      // Padlock: shackle and body.
+      const mx = sn(ax + a.w / 2), my = sn(ay + a.h / 2);
       ctx.fillStyle = COL.hazard;
-      ctx.fillRect(mx - 9, my - 3, 18, 14);
+      ctx.fillRect(mx - 2 * P, my - 4 * P, 4 * P, P);
+      ctx.fillRect(mx - 2 * P, my - 4 * P, P, 3 * P);
+      ctx.fillRect(mx + P, my - 4 * P, P, 3 * P);
+      ctx.fillRect(mx - 3 * P, my - P, 6 * P, 5 * P);
+      ctx.fillStyle = '#45424f';
+      ctx.fillRect(mx - P / 2, my + P, P, 2 * P);
       return;
     }
     ctx.fillStyle = COL.door;
-    ctx.fillRect(ax + a.w - 13, ay + a.h / 2, 4, 4);
+    ctx.fillRect(ax + a.w - 5 * P, sn(ay + a.h / 2), 2 * P, 2 * P);
     if (moving) {
       // Panicked little eyes while it runs.
       ctx.fillStyle = '#fff';
-      ctx.fillRect(ax + 9, ay + 14, 7, 7);
-      ctx.fillRect(ax + 20, ay + 14, 7, 7);
+      ctx.fillRect(ax + 4 * P, ay + 6 * P, 3 * P, 3 * P);
+      ctx.fillRect(ax + 8 * P, ay + 6 * P, 3 * P, 3 * P);
+      ctx.fillStyle = COL.playerEye;
+      ctx.fillRect(ax + 5 * P, ay + 7 * P, P, P);
+      ctx.fillRect(ax + 9 * P, ay + 7 * P, P, P);
     }
     if (chomp) {
-      spikeRow(ax + 2, ay + 8, a.w - 4, 18, 'down', COL.hazard);
-      spikeRow(ax + 2, ay + a.h - 20, a.w - 4, 18, 'up', COL.hazard);
+      spikeRow(ax + P, ay + 3 * P, a.w - 2 * P, 7 * P, 'down', COL.hazard);
+      spikeRow(ax + P, ay + a.h - 8 * P, a.w - 2 * P, 7 * P, 'up', COL.hazard);
     }
+  }
+
+  // A solid block piece (crumbling floor, ghost and hidden blocks, crushers) in tile style.
+  function blockPiece(x, y, w, h, theme, lift) {
+    ctx.fillStyle = theme.block;
+    ctx.fillRect(x, y - lift, w, h + lift);
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    if (!lift) ctx.fillRect(x, y, w, P);
+    ctx.fillStyle = theme.under;
+    ctx.fillRect(x, y + h - 2 * P, w, 2 * P);
   }
 
   function drawActor(a, s, alpha, theme) {
@@ -2008,37 +2102,38 @@ body { background: #0e0c17; }
     switch (a.type) {
       case 'crumble': {
         if (a.state === 'gone') return;
-        const wob = a.state === 'wait' ? Math.sin(s.tick * 1.1) * 2 : 0;
+        const wob = a.state === 'wait' ? sn(Math.sin(s.tick * 1.1) * 2.5) : 0;
         const lift = a.state === 'idle' && a.y === 0 ? C.TOP : 0;
-        ctx.fillStyle = theme.block;
-        ctx.fillRect(x + wob - 0.5, y - lift - 0.5, a.w + 1, a.h + lift + 1);
-        if (a.state !== 'idle' || a.y + a.h < C.ROWS * C.T) {
+        blockPiece(sn(x + wob), sn(y), a.w, a.h, theme, lift);
+        if (a.state === 'wait') {
+          // Cracks while it is about to go.
           ctx.fillStyle = theme.under;
-          ctx.fillRect(x + wob, y + a.h - 6, a.w, 6);
+          const cx = sn(x + wob + a.w / 2);
+          ctx.fillRect(cx - P, sn(y) + 2 * P, P, 3 * P);
+          ctx.fillRect(cx, sn(y) + 5 * P, P, 3 * P);
+          ctx.fillRect(cx - 2 * P, sn(y) + 8 * P, P, 2 * P);
         }
         break;
       }
       case 'ghost':
         if (!a.revealed) {
-          ctx.fillStyle = theme.block;
-          ctx.fillRect(x, y, a.w, a.h);
-          ctx.fillStyle = theme.under;
-          ctx.fillRect(x, y + a.h - 6, a.w, 6);
+          blockPiece(sn(x), sn(y), a.w, a.h, theme, 0);
         } else {
-          ctx.strokeStyle = 'rgba(255,255,255,0.22)';
-          ctx.setLineDash([6, 6]);
-          ctx.lineWidth = 2;
-          ctx.strokeRect(x + 1, y + 1, a.w - 2, a.h - 2);
-          ctx.setLineDash([]);
+          // Dotted outline where the fake block was.
+          ctx.fillStyle = 'rgba(255,255,255,0.25)';
+          const gx = sn(x), gy = sn(y);
+          for (let i = 0; i < a.w; i += 3 * P) {
+            ctx.fillRect(gx + i, gy, P, P);
+            ctx.fillRect(gx + i, gy + a.h - P, P, P);
+          }
+          for (let j = 0; j < a.h; j += 3 * P) {
+            ctx.fillRect(gx, gy + j, P, P);
+            ctx.fillRect(gx + a.w - P, gy + j, P, P);
+          }
         }
         break;
       case 'hidden':
-        if (a.revealed) {
-          ctx.fillStyle = theme.block;
-          ctx.fillRect(x, y, a.w, a.h);
-          ctx.fillStyle = theme.under;
-          ctx.fillRect(x, y + a.h - 6, a.w, 6);
-        }
+        if (a.revealed) blockPiece(sn(x), sn(y), a.w, a.h, theme, 0);
         break;
       case 'spike':
         if (a.prog > 0) {
@@ -2063,43 +2158,48 @@ body { background: #0e0c17; }
 
   function drawMover(a, x, y, s, theme) {
     if (a.state === 'gone') return;
+    x = sn(x);
+    y = sn(y);
     switch (a.look) {
       case 'crusher': {
-        const wob = a.state === 'wait' ? Math.sin(s.tick * 1.2) * 2 : 0;
-        ctx.fillStyle = theme.block;
-        ctx.fillRect(x + wob, y, a.w, a.h);
-        ctx.fillStyle = theme.under;
-        ctx.fillRect(x + wob, y + a.h - 6, a.w, 6);
+        const wob = a.state === 'wait' ? sn(Math.sin(s.tick * 1.2) * 2.5) : 0;
+        blockPiece(x + wob, y, a.w, a.h, theme, 0);
         if (a.state === 'wait' || a.state === 'move') {
           ctx.fillStyle = COL.hazard;
-          ctx.fillRect(x + wob, y + a.h - 8, a.w, 8);
+          ctx.fillRect(x + wob, y + a.h - 3 * P, a.w, 3 * P);
         }
         break;
       }
       case 'wall':
         ctx.fillStyle = COL.hazard;
         ctx.fillRect(x - 1000, y - C.TOP, a.w + 1000 - 24, a.h + C.TOP);
+        ctx.fillStyle = '#c41e44';
+        for (let j = 0; j < a.h + C.TOP; j += 6 * P) ctx.fillRect(x + a.w - 24 - 4 * P, y - C.TOP + j, 2 * P, 3 * P);
         spikeRow(x + a.w - 24, y - C.TOP, 24, a.h + C.TOP, 'right', COL.hazard);
         break;
-      case 'bullet':
+      case 'bullet': {
         if (a.state !== 'move') return;
+        // A stepped arrowhead pointing left, a body, and a faint trail.
+        const midY = sn(y + a.h / 2);
+        pixTri(x, midY, a.h / 2, 18, 'left', COL.hazard, '#c41e44');
         ctx.fillStyle = COL.hazard;
-        ctx.beginPath();
-        ctx.moveTo(x, y + a.h / 2);
-        ctx.lineTo(x + 18, y);
-        ctx.lineTo(x + a.w, y);
-        ctx.lineTo(x + a.w, y + a.h);
-        ctx.lineTo(x + 18, y + a.h);
-        ctx.closePath();
-        ctx.fill();
+        ctx.fillRect(x + 18, y, a.w - 18, a.h);
+        ctx.fillStyle = '#c41e44';
+        ctx.fillRect(x + 18, midY, a.w - 18, a.h / 2);
         ctx.fillStyle = 'rgba(255,45,85,0.35)';
-        ctx.fillRect(x + a.w + 6, y + 4, 30, a.h - 8);
+        ctx.fillRect(x + a.w + 2 * P, y + 2 * P, 12 * P, a.h - 4 * P);
         break;
+      }
       case 'platform':
         ctx.fillStyle = COL.platform;
         ctx.fillRect(x, y, a.w, a.h);
+        ctx.fillStyle = 'rgba(255,255,255,0.4)';
+        ctx.fillRect(x, y, a.w, P);
         ctx.fillStyle = 'rgba(0,0,0,0.2)';
-        ctx.fillRect(x, y + a.h - 6, a.w, 6);
+        ctx.fillRect(x, y + a.h - 2 * P, a.w, 2 * P);
+        // Rivets.
+        ctx.fillStyle = 'rgba(0,0,0,0.25)';
+        for (let i = 2 * P; i < a.w - P; i += 6 * P) ctx.fillRect(x + i, y + 3 * P, P, P);
         break;
     }
   }
@@ -2111,34 +2211,27 @@ body { background: #0e0c17; }
       ctx.fillStyle = COL.pad;
       for (let y = 0; y < a.h; y += 20) {
         const on = ((y / 20 + Math.floor(phase * 2)) % 2) === 0;
-        if (on) ctx.fillRect(a.x + T / 2 - 3, y, 6, 12);
+        if (on) ctx.fillRect(a.x + T / 2 - P, y, 2 * P, 5 * P);
       }
-      chevrons(a.x + T / 2, a.y + a.h - 70);
+      chevrons(a.x + T / 2, sn(a.y + a.h - 70));
       return;
     }
     ctx.fillStyle = COL.pad;
     const floor = a.side === 'floor';
-    const barY = floor ? a.y + T - 8 : a.y;
-    ctx.fillRect(a.x + 2, barY, T - 4, 8);
+    const barY = floor ? a.y + T - 3 * P : a.y;
+    ctx.fillRect(a.x + P, barY, T - 2 * P, 3 * P);
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.fillRect(a.x + P, floor ? barY : barY + 2 * P, T - 2 * P, P);
     // An arrow shows which way it throws you.
-    const bob = Math.sin(s.tick * 0.06) * 3;
+    const bob = sn(Math.sin(s.tick * 0.06) * 3);
     const mid = a.x + T / 2;
-    const tipY = floor ? a.y + 2 + bob : a.y + T - 2 + bob;
-    const baseY = floor ? a.y + 22 + bob : a.y + 18 + bob;
-    ctx.beginPath();
-    ctx.moveTo(mid, tipY);
-    ctx.lineTo(mid - 10, baseY);
-    ctx.lineTo(mid + 10, baseY);
-    ctx.closePath();
-    ctx.fill();
+    if (floor) pixTri(mid, a.y + P + bob, 4 * P, 8 * P, 'up', COL.pad);
+    else pixTri(mid, a.y + T - P + bob, 4 * P, 8 * P, 'down', COL.pad);
   }
 
   function chevrons(cx, cy) {
-    ctx.fillStyle = COL.pad;
-    ctx.beginPath();
-    ctx.moveTo(cx - 18, cy); ctx.lineTo(cx - 6, cy - 9); ctx.lineTo(cx - 6, cy + 9); ctx.closePath();
-    ctx.moveTo(cx + 18, cy); ctx.lineTo(cx + 6, cy - 9); ctx.lineTo(cx + 6, cy + 9); ctx.closePath();
-    ctx.fill();
+    pixTri(cx - 7 * P, cy, 4 * P, 5 * P, 'left', COL.pad);
+    pixTri(cx + 7 * P, cy, 4 * P, 5 * P, 'right', COL.pad);
   }
 
   function drawDeathMarks(marks) {
@@ -2148,37 +2241,79 @@ body { background: #0e0c17; }
       const x = Math.max(9, Math.min(C.W - 9, m.x));
       const y = Math.max(9, Math.min(C.ROWS * C.T - 9, m.y));
       ctx.save();
-      ctx.translate(x, y + 9);
-      drawToast(18, 18, COL.burntCrust, COL.burnt);
+      ctx.translate(sn(x), sn(y + 9));
+      drawToast(18, 18, COL.burntCrust, COL.burnt, { x: true });
       ctx.restore();
     }
     ctx.globalAlpha = 1;
   }
 
-  // A slice of toast standing on (0, 0): crust outline, soft bread inside, puffed-out head.
-  function toastPath(w, h, inset) {
-    const hw = w / 2 - inset;
-    const body = hw * 0.8;
-    const top = -h + inset;
-    const neck = -h * 0.62;
-    const base = -inset;
-    ctx.beginPath();
-    ctx.moveTo(-body, base);
-    ctx.lineTo(-body, neck);
-    ctx.quadraticCurveTo(-hw, neck, -hw, neck - (neck - top) * 0.45);
-    ctx.quadraticCurveTo(-hw, top, 0, top);
-    ctx.quadraticCurveTo(hw, top, hw, neck - (neck - top) * 0.45);
-    ctx.quadraticCurveTo(hw, neck, body, neck);
-    ctx.lineTo(body, base);
-    ctx.closePath();
-    ctx.fill();
+  // The toast as a 12x12 pixel sprite: c crust, b bread, h highlight. Faces are added on top.
+  const TOAST = [
+    '..cccccccc..',
+    '.chhbbbbbbc.',
+    'chbbbbbbbbbc',
+    'chbbbbbbbbbc',
+    'cbbbbbbbbbbc',
+    '.cbbbbbbbbc.',
+    '.cbbbbbbbbc.',
+    '.cbbbbbbbbc.',
+    '.cbbbbbbbbc.',
+    '.cbbbbbbbbc.',
+    '.cbbbbbbbbc.',
+    '.cccccccccc.',
+  ];
+  const SPRITE = 12;
+  let sprite = null;
+
+  // Paints the sprite for one frame. face: { look: -1..1, eyeH, eyeW, mouth: 'line'|'o', x: burnt eyes }.
+  function toastSprite(crust, bread, face) {
+    if (!sprite) {
+      sprite = root.document.createElement('canvas');
+      sprite.width = sprite.height = SPRITE;
+    }
+    const s = sprite.getContext('2d');
+    s.clearRect(0, 0, SPRITE, SPRITE);
+    const light = bread === COL.bread ? '#ffeec4' : '#948399';
+    for (let r = 0; r < SPRITE; r++) {
+      for (let c = 0; c < SPRITE; c++) {
+        const k = TOAST[r][c];
+        if (k === '.') continue;
+        s.fillStyle = k === 'c' ? crust : k === 'h' ? light : bread;
+        s.fillRect(c, r, 1, 1);
+      }
+    }
+    if (!face) return sprite;
+    if (face.x) {
+      // Burnt: an X for each eye.
+      s.fillStyle = COL.player;
+      for (const ex of [2, 7]) {
+        s.fillRect(ex, 2, 1, 1); s.fillRect(ex + 2, 2, 1, 1);
+        s.fillRect(ex + 1, 3, 1, 1);
+        s.fillRect(ex, 4, 1, 1); s.fillRect(ex + 2, 4, 1, 1);
+      }
+      return sprite;
+    }
+    const lx = face.look || 0;
+    const eh = face.eyeH || 2, ew = face.eyeW || 1;
+    s.fillStyle = COL.playerEye;
+    s.fillRect(3 + lx, 5 - eh, ew, eh);
+    s.fillRect(8 + lx - (ew - 1), 5 - eh, ew, eh);
+    if (face.mouth === 'o') s.fillRect(5 + lx, 7, 2, 2);
+    else if (face.mouth !== 'none') s.fillRect(5 + lx, 8, 2, 1);
+    return sprite;
   }
 
-  function drawToast(w, h, crust, bread) {
-    ctx.fillStyle = crust;
-    toastPath(w, h, 0);
-    ctx.fillStyle = bread;
-    toastPath(w, h, 3);
+  // Draws a slice standing on (0, 0), w by h world units (28 is the player's size).
+  function drawToast(w, h, crust, bread, face) {
+    const spr = toastSprite(crust, bread, face === undefined ? { mouth: 'none', eyeH: 0 } : face);
+    const k = (SPRITE * P) / C.PW;
+    const dw = Math.max(1, Math.round((w * k) / P)) * P;
+    const dh = Math.max(1, Math.round((h * k) / P)) * P;
+    const smooth = ctx.imageSmoothingEnabled;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(spr, -Math.round(dw / P / 2) * P, -dh, dw, dh);
+    ctx.imageSmoothingEnabled = smooth;
   }
 
   function drawPlayer(p, alpha, fx, tick) {
@@ -2186,57 +2321,43 @@ body { background: #0e0c17; }
     const w = C.PW * fx.sqX, h = C.PH * fx.sqY;
     const flip = p.g < 0;
     ctx.save();
-    ctx.translate(x + C.PW / 2, flip ? y : y + C.PH);
+    ctx.translate(sn(x + C.PW / 2), sn(flip ? y : y + C.PH));
     if (flip) ctx.scale(1, -1);
     const pop = 1 + fx.pulse * 0.25;
     ctx.scale(pop, pop);
-    drawToast(w, h, COL.crust, COL.bread);
-
-    // Eyes look where it is going and widen when falling.
+    // Eyes look where it is going and widen when falling; a worried o while falling.
     const falling = p.vy * p.g > 200;
-    const look = p.face * (1 + Math.min(1.5, Math.abs(p.vx) / 180));
+    const look = Math.abs(p.vx) > 60 ? p.face : 0;
     const blink = tick % 340 < 12 && p.grounded;
-    const eyeW = falling ? 5 : 4;
-    const eyeH = blink ? 1.5 : falling ? 7 : 6;
-    const ey = -h * 0.74 - eyeH / 2 + (p.vy * p.g < -100 ? -1 : 0);
-    ctx.fillStyle = COL.playerEye;
-    ctx.fillRect(look - 5 - eyeW / 2, ey, eyeW, eyeH);
-    ctx.fillRect(look + 5 - eyeW / 2, ey, eyeW, eyeH);
-    // Small mouth; a worried o while falling.
-    ctx.fillRect(look - (falling ? 2 : 3), -h * 0.36, falling ? 4 : 6, falling ? 4 : 2);
+    drawToast(w, h, COL.crust, COL.bread, {
+      look,
+      eyeH: blink ? 1 : falling ? 3 : 2,
+      eyeW: falling ? 2 : 1,
+      mouth: falling ? 'o' : 'line',
+    });
     ctx.restore();
   }
 
   function drawBurnt(p, fx) {
     const w = C.PW * fx.sqX, h = C.PH * fx.sqY;
     ctx.save();
-    ctx.translate(p.x + C.PW / 2, p.g < 0 ? p.y : p.y + C.PH);
+    ctx.translate(sn(p.x + C.PW / 2), sn(p.g < 0 ? p.y : p.y + C.PH));
     if (p.g < 0) ctx.scale(1, -1);
-    drawToast(w, h, COL.burntCrust, COL.burnt);
-    ctx.strokeStyle = COL.player;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    const ey = -h * 0.72;
-    for (const ex of [-5, 5]) {
-      ctx.moveTo(ex - 3, ey - 3); ctx.lineTo(ex + 3, ey + 3);
-      ctx.moveTo(ex + 3, ey - 3); ctx.lineTo(ex - 3, ey + 3);
-    }
-    ctx.stroke();
+    drawToast(w, h, COL.burntCrust, COL.burnt, { x: true });
     ctx.restore();
   }
 
   function drawParticles(fx) {
     for (const p of fx.particles) {
       const k = p.life / p.max;
-      const size = p.size * Math.min(1, k * 1.6);
+      const size = Math.max(P, sn(p.size * Math.min(1, k * 1.6)));
       ctx.fillStyle = p.color;
-      ctx.fillRect(p.x - size / 2, p.y - size / 2, size, size);
+      ctx.fillRect(sn(p.x - size / 2), sn(p.y - size / 2), size, size);
     }
   }
 
   function pill(x, y, w, h) {
-    ctx.fillStyle = 'rgba(14,12,23,0.82)';
-    ctx.fillRect(x, y, w, h);
+    box(x, y, w, h, 'rgba(14,12,23,0.82)');
   }
 
   function drawHud(g) {
@@ -2291,12 +2412,36 @@ body { background: #0e0c17; }
     const fx = G.Fx;
     const shake = fx.shakeOffset();
 
+    // The level itself, in pixels.
+    beginPixels();
     ctx.save();
-    ctx.translate(shake.x, shake.y);
+    ctx.translate(sn(shake.x), sn(shake.y));
     drawBackdrop(theme);
     ctx.save();
     ctx.translate(0, C.TOP);
+    drawDeathMarks(g.marks);
+    // Actors first so the fixed tiles hide anything that slides out from behind them.
+    for (const a of s.actors) if (a.type === 'pad' || a.type === 'door') drawActor(a, s, alpha, theme);
+    for (const a of s.actors) if (a.type !== 'pad' && a.type !== 'door') drawActor(a, s, alpha, theme);
+    drawTiles(lv, theme, s.holes);
+    drawStaticSpikes(lv);
+    if (s.status === 'play') drawPlayer(s.player, alpha, fx, s.tick);
+    else if (s.status === 'dead') drawBurnt(s.player, fx);
+    drawParticles(fx);
+    ctx.restore();
+    if (deck) {
+      const v = bounds();
+      ctx.fillStyle = theme.under;
+      ctx.fillRect(v.L - 40, C.H, v.R - v.L + 80, v.B - C.H + 40);
+    }
+    ctx.restore();
+    endPixels();
 
+    // Words, HUD and buttons on top, at full resolution.
+    ctx.save();
+    ctx.translate(shake.x, shake.y);
+    ctx.save();
+    ctx.translate(0, C.TOP);
     if (g.introT > 0) {
       const f = Math.min(1, g.introT / 0.4);
       ctx.globalAlpha = f * 0.16;
@@ -2304,15 +2449,6 @@ body { background: #0e0c17; }
       text(String(s.index + 1).padStart(2, '0'), C.W / 2, (introV.T + introV.B) / 2 - C.TOP - 60, 160, '#fff', 'center', 800);
       ctx.globalAlpha = 1;
     }
-
-    drawDeathMarks(g.marks);
-
-    // Actors first so the fixed tiles hide anything that slides out from behind them.
-    for (const a of s.actors) if (a.type === 'pad' || a.type === 'door') drawActor(a, s, alpha, theme);
-    for (const a of s.actors) if (a.type !== 'pad' && a.type !== 'door') drawActor(a, s, alpha, theme);
-    drawTiles(lv, theme, s.holes);
-    drawStaticSpikes(lv);
-
     if (s.index === 0) {
       if (g.touch) {
         // Sits in the free space between the move and jump buttons.
@@ -2325,17 +2461,8 @@ body { background: #0e0c17; }
     } else if (s.index === 3) {
       text(G.t('jumpHint'), 3 * C.T, 11.5 * C.T, 13, theme.bg, 'center', 700, 225);
     }
-
-    if (s.status === 'play') drawPlayer(s.player, alpha, fx, s.tick);
-    else if (s.status === 'dead') drawBurnt(s.player, fx);
-    drawParticles(fx);
     ctx.restore();
 
-    if (deck) {
-      const v = bounds();
-      ctx.fillStyle = theme.under;
-      ctx.fillRect(v.L - 40, C.H, v.R - v.L + 80, v.B - C.H + 40);
-    }
     // HUD and buttons stay at the top of whatever part of the level is showing.
     ctx.save();
     ctx.translate(0, hudY());
@@ -2359,37 +2486,38 @@ body { background: #0e0c17; }
 
   function drawTitle(g) {
     const theme = COL.themes[0];
-    drawBackdrop(theme);
     const groundY = 400;
+    const t = g.clock;
+    beginPixels();
+    drawBackdrop(theme);
     const view = bounds();
     ctx.fillStyle = theme.block;
     ctx.fillRect(view.L, groundY, view.R - view.L, view.B - groundY);
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.fillRect(view.L, groundY, view.R - view.L, P);
     ctx.fillStyle = theme.under;
-    ctx.fillRect(view.L, groundY, view.R - view.L, 6);
+    for (let c = Math.floor(view.L / C.T); c < view.R / C.T; c++) {
+      for (let k = 0; k < 3; k++) ctx.fillRect(c * C.T + P + speck(c, 10, k) * P, groundY + 3 * P + (speck(10, c, k + 7) % 12) * P, P, P);
+    }
 
-    text(G.t('title'), C.W / 2, 150, G.LANG === 'zh' ? 88 : 80, '#fff', 'center', 800);
-    text(G.t('tagline'), C.W / 2, 220, 22, COL.hazard, 'center');
-
-    // The block hops, and lands on the X marks of its previous lives.
-    const t = g.clock;
+    // The toast hops, and lands on the X marks of its previous lives.
     const period = 1.1;
     const phase = (t % period) / period;
     const hop = 4 * phase * (1 - phase);
-    const px = C.W / 2 - 14, py = groundY - 28 - hop * 80;
     const sq = phase < 0.08 || phase > 0.94 ? 1.18 : 0.94;
-    // Drawn larger here so the character reads on the title screen.
+    // Drawn twice as large here so the character reads on the title screen.
     ctx.save();
-    ctx.translate(px + 14, py + 28);
-    ctx.scale(1.6, 1.6);
-    drawToast(28 * sq, 28 / sq, COL.crust, COL.bread);
-    ctx.fillStyle = COL.playerEye;
-    ctx.fillRect(-7, -22 / sq, 4, 6);
-    ctx.fillRect(3, -22 / sq, 4, 6);
-    ctx.fillRect(-3, -10 / sq, 6, 2);
+    ctx.translate(C.W / 2, sn(groundY - hop * 80));
+    ctx.scale(2, 2);
+    drawToast(28 * sq, 28 / sq, COL.crust, COL.bread, { look: 0, mouth: 'line' });
     ctx.restore();
     drawDeathMarks([{ x: C.W / 2 - 150, y: groundY - 9 }, { x: C.W / 2 + 120, y: groundY - 9 }, { x: C.W / 2 + 180, y: groundY - 9 }]);
     spikeRow(C.W / 2 + 230, groundY - 40, 80, 40, 'up', COL.hazard);
     spikeRow(C.W / 2 - 300, groundY - 40, 40, 40, 'up', COL.hazard);
+    endPixels();
+
+    text(G.t('title'), C.W / 2, 150, G.LANG === 'zh' ? 88 : 80, '#fff', 'center', 800);
+    text(G.t('tagline'), C.W / 2, 220, 22, COL.hazard, 'center');
 
     const blink = Math.floor(t * 1.6) % 2 === 0;
     const returning = G.Save.level > 0;
@@ -2404,8 +2532,9 @@ body { background: #0e0c17; }
 
   function drawShareButton() {
     const b = G.Share.button();
-    ctx.fillStyle = COL.door;
-    ctx.fillRect(b.x, b.y, b.w, b.h);
+    box(b.x, b.y, b.w, b.h, COL.door);
+    ctx.fillStyle = COL.doorDark;
+    ctx.fillRect(b.x + P, b.y + b.h - P, b.w - 2 * P, P);
     const label = G.Game.touch ? G.t('share').replace(/\s*[（(]S[）)]/, '') : G.t('share');
     text(label, b.x + b.w / 2, b.y + b.h / 2 + 1, 19, '#0b3b2c', 'center', 700, b.w - 16);
   }
@@ -2414,9 +2543,8 @@ body { background: #0e0c17; }
     if (!g.notice) return;
     ctx.font = `700 18px ${FONT}`;
     const w = ctx.measureText(g.notice.text).width + 28;
-    ctx.fillStyle = COL.door;
     const y = topCentre(16 - hudY()) + hudY(); // drawn in world space, not HUD space
-    ctx.fillRect(C.W / 2 - w / 2, y, w, 36);
+    box(C.W / 2 - w / 2, y, w, 36, COL.door);
     text(g.notice.text, C.W / 2, y + 19, 18, '#0b3b2c', 'center');
   }
 
@@ -2428,6 +2556,7 @@ body { background: #0e0c17; }
     canvasTextLimit = W - 80;
     const theme = COL.themes[0];
     const groundY = H - 120;
+    ctx.imageSmoothingEnabled = false;
     ctx.fillStyle = theme.bg;
     ctx.fillRect(0, 0, W, H);
     ctx.fillStyle = theme.block;
@@ -2448,7 +2577,7 @@ body { background: #0e0c17; }
     for (let i = 0; i < slices; i++) {
       ctx.save();
       ctx.translate(70 + i * 30, groundY);
-      drawToast(30, 30, COL.burntCrust, COL.burnt);
+      drawToast(30, 30, COL.burntCrust, COL.burnt, { x: true });
       ctx.restore();
     }
 
@@ -2456,11 +2585,7 @@ body { background: #0e0c17; }
     ctx.save();
     ctx.translate(W - 170, groundY);
     ctx.scale(6, 6);
-    drawToast(28, 28, COL.crust, COL.bread);
-    ctx.fillStyle = COL.playerEye;
-    ctx.fillRect(-9, -21, 4, 6);
-    ctx.fillRect(1, -21, 4, 6);
-    ctx.fillRect(-6, -10, 6, 2);
+    drawToast(28, 28, COL.crust, COL.bread, { look: -1, mouth: 'line' });
     ctx.restore();
 
     text(G.t('cardDare'), W / 2, groundY + 62, 40, theme.bg, 'center', 800, W - 120);
@@ -2470,15 +2595,13 @@ body { background: #0e0c17; }
 
   function drawLangButton() {
     const b = G.Lang.button();
-    ctx.fillStyle = 'rgba(14,12,23,0.82)';
-    ctx.fillRect(b.x, b.y, b.w, b.h);
+    pill(b.x, b.y, b.w, b.h);
     text(`▾ ${G.Lang.currentName()}`, b.x + b.w / 2, b.y + b.h / 2 + 1, 16, '#fff', 'center', 700, b.w - 12);
   }
 
   function drawMuteButton() {
     const b = G.Audio.button();
-    ctx.fillStyle = 'rgba(14,12,23,0.82)';
-    ctx.fillRect(b.x, b.y, b.w, b.h);
+    pill(b.x, b.y, b.w, b.h);
     const cx = b.x + b.w / 2 - 3, cy = b.y + b.h / 2;
     ctx.fillStyle = '#fff';
     ctx.beginPath();
@@ -2505,15 +2628,16 @@ body { background: #0e0c17; }
     fillAll('rgba(14,12,23,0.92)');
     for (const cell of G.Lang.cells()) {
       const active = cell.code === G.LANG;
-      ctx.fillStyle = active ? COL.door : 'rgba(255,255,255,0.1)';
-      ctx.fillRect(cell.x, cell.y, cell.w, cell.h);
+      box(cell.x, cell.y, cell.w, cell.h, active ? COL.door : 'rgba(255,255,255,0.1)');
       text(cell.name, cell.x + cell.w / 2, cell.y + cell.h / 2 + 1, 21, active ? '#0b3b2c' : '#fff', 'center', 700, cell.w - 16);
     }
   }
 
   function drawEnd() {
     const theme = COL.themes[0];
+    beginPixels();
     drawBackdrop(theme);
+    endPixels();
     text(G.t('endTitle'), C.W / 2, 170, 58, '#fff', 'center', 800);
     text(G.t('endStat'), C.W / 2, 262, 22, 'rgba(255,255,255,0.7)', 'center');
     text(String(G.Save.totalDeaths), C.W / 2, 320, 72, COL.hazard, 'center', 800);
@@ -2522,22 +2646,22 @@ body { background: #0e0c17; }
   }
 
   function drawMenuButton(b, label) {
-    ctx.fillStyle = '#191627';
-    ctx.fillRect(b.x, b.y, b.w, b.h);
+    box(b.x, b.y, b.w, b.h, '#191627');
     text(label, b.x + b.w / 2, b.y + b.h / 2 + 1, 17, '#fff', 'center', 700, b.w - 16);
   }
 
-  function arrow(cx, cy, dir, color, k) {
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    if (dir === 'up') {
-      ctx.moveTo(cx, cy - 22 * k); ctx.lineTo(cx - 24 * k, cy + 16 * k); ctx.lineTo(cx + 24 * k, cy + 16 * k);
-    } else {
-      const d = dir === 'left' ? -1 : 1;
-      ctx.moveTo(cx + d * 22 * k, cy); ctx.lineTo(cx - d * 16 * k, cy - 24 * k); ctx.lineTo(cx - d * 16 * k, cy + 24 * k);
-    }
-    ctx.closePath();
-    ctx.fill();
+  // Stepped arrow for the touch buttons: a faint dark rim (so it shows on the light floor) under a ghost fill.
+  function arrow(cx, cy, dir, color, rim, k) {
+    cx = sn(cx);
+    cy = sn(cy);
+    const half = sn(24 * k), len = sn(38 * k), tip = sn(22 * k);
+    const at = (grow) => {
+      if (dir === 'up') pixTri(cx, cy - tip - grow, half + grow, len + 2 * grow, 'up', grow ? rim : color);
+      else if (dir === 'left') pixTri(cx - tip - grow, cy, half + grow, len + 2 * grow, 'left', grow ? rim : color);
+      else pixTri(cx + tip + grow, cy, half + grow, len + 2 * grow, 'right', grow ? rim : color);
+    };
+    at(P);
+    at(0);
   }
 
   function drawTouchControls() {
@@ -2545,16 +2669,14 @@ body { background: #0e0c17; }
       const down = G.Touch.isDown(b.name);
       // Ghosted so the level stays readable: never a panel, only a faint arrow that works on
       // both the dark background and the light floor. A press only brightens the arrow.
-      arrow(b.x + b.w / 2, b.y + b.h / 2, b.name === 'jump' ? 'up' : b.name, down ? 'rgba(255,201,51,0.6)' : 'rgba(255,255,255,0.22)', b.w / 108);
-      ctx.strokeStyle = down ? 'rgba(14,12,23,0.35)' : 'rgba(14,12,23,0.2)';
-      ctx.lineWidth = 2;
-      ctx.stroke();
+      arrow(b.x + b.w / 2, b.y + b.h / 2, b.name === 'jump' ? 'up' : b.name,
+        down ? 'rgba(255,201,51,0.6)' : 'rgba(255,255,255,0.22)', down ? 'rgba(14,12,23,0.35)' : 'rgba(14,12,23,0.2)', b.w / 108);
     }
     const p = G.Touch.pauseButton();
     pill(p.x, p.y, p.w, p.h);
     ctx.fillStyle = '#fff';
-    ctx.fillRect(p.x + p.w / 2 - 8, p.y + 9, 5, 16);
-    ctx.fillRect(p.x + p.w / 2 + 3, p.y + 9, 5, 16);
+    ctx.fillRect(sn(p.x + p.w / 2 - 8), p.y + 9, 2 * P, 16);
+    ctx.fillRect(sn(p.x + p.w / 2 + 3), p.y + 9, 2 * P, 16);
   }
 
   function drawRotate() {
